@@ -1,0 +1,19 @@
+.git
+.claude
+.codex
+.DS_Store
+.env
+.local-data
+.tmp-*
+.venv
+*.log
+*.pyc
+*.tar.gz
+**/__pycache__/
+react-ui/node_modules/
+server/uploads/
+server/cache/
+
+# Keep image-toolbox experiments out of the viral-workbench release image.
+react-ui/src/pages/ImageToolboxPage.jsx
+server/routers/image_tools_routes.py

@@ -1,0 +1,47 @@
+# Blue/green nginx server for Game Video Tool production.
+# Install with root privileges after creating:
+#   /etc/nginx/conf.d/game-video-tool-upstream.inc
+# The upstream include should contain exactly:
+#   set $game_video_backend http://127.0.0.1:57991;
+
+limit_req_zone $binary_remote_addr zone=login_zone:10m rate=5r/s;
+
+server {
+    listen 80 default_server;
+    server_name _;
+
+    include /etc/nginx/conf.d/game-video-tool-upstream.inc;
+
+    client_max_body_size 500m;
+
+    location = /api/auth/login {
+        limit_req zone=login_zone burst=20 nodelay;
+
+        proxy_pass $game_video_backend;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_read_timeout 60;
+        proxy_send_timeout 60;
+    }
+
+    location / {
+        proxy_pass $game_video_backend;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_read_timeout 300;
+        proxy_send_timeout 300;
+    }
+}

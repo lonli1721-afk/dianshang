@@ -1,0 +1,208 @@
+export const AI_MODELS = [
+  { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro' },
+  { id: 'gpt-5.4', name: 'GPT-5.4' },
+  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+]
+
+export const REVERSE_MODELS = [
+  { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro (推荐)' },
+  { id: 'gpt-5.4', name: 'GPT-5.4' },
+  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+]
+
+export const TASK_POLL_INTERVAL_MS = 12000
+export const TASK_POLL_HIDDEN_INTERVAL_MS = 60000
+export const TASK_POLL_JITTER_MS = 2500
+export const TASK_POLL_LIMIT = 200
+export const SCENE_AUTOSAVE_DEBOUNCE_MS = 3500
+export const REFERENCE_VIDEO_DURATION_LIMIT_SECONDS = 15.2
+export const HAPPYHORSE_VIDEO_EDIT_MIN_SECONDS = 3
+export const HAPPYHORSE_VIDEO_EDIT_MAX_SECONDS = 60
+export const MAX_ADVANCED_REFERENCE_VIDEOS = 3
+export const WAN_REFERENCE_VIDEO_MIN_SECONDS = 2
+export const WAN_REFERENCE_VIDEO_MAX_SECONDS = 30
+
+export const IMAGE_ASPECT_OPTIONS = [
+  { id: '1:1', label: '1:1', width: 1024, height: 1024 },
+  { id: '16:9', label: '16:9', width: 1280, height: 720 },
+  { id: '9:16', label: '9:16', width: 720, height: 1280 },
+  { id: '4:3', label: '4:3', width: 1152, height: 864 },
+  { id: '3:4', label: '3:4', width: 864, height: 1152 },
+]
+
+export const VIDEO_RESOLUTION_OPTIONS = [
+  { id: '720p', label: '720P 标准' },
+  { id: '1080p', label: '1080P 高清' },
+]
+
+export const IMAGE_QUALITY_OPTIONS = [
+  { id: '1K', label: '1K 基础' },
+  { id: '2K', label: '2K 标准' },
+  { id: '4K', label: '4K 超清' },
+]
+
+export const DEFAULT_IMAGE_ASPECT_RATIO = '1:1'
+
+export const FALLBACK_VIDEO_MODELS = [
+  {
+    id: 'seedance-2.0',
+    name: 'Seedance 2.0',
+    provider: 'jimeng',
+    supports_ref_video: true,
+    supports_ref_images: true,
+    min_duration: 4,
+    max_duration: 15,
+    max_ref_images: 9,
+    max_ref_videos: 3,
+    ref_video_duration_limit: 15.2,
+    supported_resolutions: ['720p', '1080p'],
+    default_resolution: '720p',
+    limit_note: '生成时长 4-15 秒；支持 720P/1080P；参考视频/高级视频编辑参考视频需 15.2 秒以内',
+    supported_modes: ['generate', 'reference_video', 'advanced_video', 'motion_transfer'],
+    price_per_second: 1.0,
+    price_unit: 'CNY',
+    price_resolution_multiplier_1080p: 2.25,
+    price_note: '官方按输出视频像素、帧率、时长折算 token 计费；1080P 约为 720P 的 2.25 倍',
+  },
+  {
+    id: 'seedance-2.0-fast',
+    name: 'Seedance 2.0 Fast',
+    provider: 'jimeng',
+    supports_ref_video: true,
+    supports_ref_images: true,
+    min_duration: 4,
+    max_duration: 10,
+    max_ref_images: 9,
+    max_ref_videos: 3,
+    ref_video_duration_limit: 15.2,
+    supported_resolutions: ['720p'],
+    default_resolution: '720p',
+    limit_note: '生成时长 4-10 秒；Fast 仅开放 720P；参考视频/高级视频编辑参考视频需 15.2 秒以内',
+    supported_modes: ['generate', 'reference_video', 'advanced_video'],
+    price_per_second: 0.8,
+    price_unit: 'CNY',
+  },
+  {
+    id: 'seedance-1.5-pro',
+    name: 'Seedance 1.5 Pro',
+    provider: 'jimeng',
+    supports_ref_video: false,
+    supports_ref_images: false,
+    min_duration: 4,
+    max_duration: 10,
+    supported_resolutions: ['720p'],
+    default_resolution: '720p',
+    limit_note: '生成时长 4-10 秒；不支持参考视频；当前仅开放 720P',
+    supported_modes: ['generate'],
+    price_per_second: 0.3,
+    price_unit: 'CNY',
+  },
+  {
+    id: 'viduq3-pro',
+    name: 'VIDU Q3 Pro',
+    provider: 'vidu',
+    supports_ref_video: false,
+    supports_ref_images: true,
+    min_duration: 1,
+    max_duration: 16,
+    max_ref_images: 1,
+    supported_resolutions: ['720p'],
+    default_resolution: '720p',
+    supported_modes: ['generate'],
+    price_per_second: 0.95,
+    price_unit: 'CNY',
+  },
+  {
+    id: 'viduq3-turbo',
+    name: 'VIDU Q3 Turbo',
+    provider: 'vidu',
+    supports_ref_video: false,
+    supports_ref_images: true,
+    min_duration: 1,
+    max_duration: 16,
+    max_ref_images: 1,
+    supported_resolutions: ['720p'],
+    default_resolution: '720p',
+    supported_modes: ['generate'],
+    price_per_second: 0.45,
+    price_unit: 'CNY',
+  },
+  {
+    id: 'happyhorse-1.0-t2v',
+    name: 'HappyHorse 1.0 文生视频',
+    provider: 'happyhorse',
+    supports_ref_video: false,
+    supports_ref_images: false,
+    min_duration: 3,
+    max_duration: 15,
+    supported_resolutions: ['720p', '1080p'],
+    default_resolution: '720p',
+    limit_note: '生成时长 3-15 秒；不需要参考图/参考视频',
+    supported_modes: ['generate'],
+    price_per_second: 0.9,
+    price_unit: 'CNY',
+    price_per_second_1080p: 1.6,
+    price_note: '官方价格：720P 0.9元/秒，1080P 1.6元/秒',
+  },
+  {
+    id: 'happyhorse-1.0-i2v',
+    name: 'HappyHorse 1.0 首帧图生视频',
+    provider: 'happyhorse',
+    supports_ref_video: false,
+    supports_ref_images: true,
+    min_duration: 3,
+    max_duration: 15,
+    min_ref_images: 1,
+    max_ref_images: 1,
+    supported_resolutions: ['720p', '1080p'],
+    default_resolution: '720p',
+    limit_note: '生成时长 3-15 秒；必须且只能使用 1 张首帧参考图；不支持参考视频',
+    supported_modes: ['generate'],
+    price_per_second: 0.9,
+    price_unit: 'CNY',
+    price_per_second_1080p: 1.6,
+    price_note: '官方价格：720P 0.9元/秒，1080P 1.6元/秒',
+  },
+  {
+    id: 'happyhorse-1.0-r2v',
+    name: 'HappyHorse 1.0 参考图生视频',
+    provider: 'happyhorse',
+    supports_ref_video: false,
+    supports_ref_images: true,
+    min_duration: 3,
+    max_duration: 15,
+    min_ref_images: 1,
+    max_ref_images: 9,
+    supported_resolutions: ['720p', '1080p'],
+    default_resolution: '720p',
+    limit_note: '生成时长 3-15 秒；支持 1-9 张角色/场景参考图；不支持参考视频',
+    supported_modes: ['generate'],
+    price_per_second: 0.9,
+    price_unit: 'CNY',
+    price_per_second_1080p: 1.6,
+    price_note: '官方价格：720P 0.9元/秒，1080P 1.6元/秒',
+  },
+  {
+    id: 'happyhorse-1.0-video-edit',
+    name: 'HappyHorse 1.0 视频编辑',
+    provider: 'happyhorse',
+    supports_ref_video: true,
+    supports_ref_images: true,
+    min_duration: 3,
+    max_duration: 15,
+    max_ref_images: 5,
+    max_ref_videos: 1,
+    ref_video_duration_min: 3,
+    ref_video_duration_limit: 60,
+    supported_resolutions: ['720p', '1080p'],
+    default_resolution: '720p',
+    limit_note: '输出视频最长 15 秒；输入参考视频需 3-60 秒；最多 1 个参考视频，可叠加 0-5 张参考图',
+    supported_modes: ['reference_video', 'advanced_video'],
+    price_per_second: 0.9,
+    price_unit: 'CNY',
+    price_per_second_1080p: 1.6,
+    price_billing: 'input_output',
+    price_note: '官方价格：720P 0.9元/秒，1080P 1.6元/秒；视频编辑按输入视频与输出视频分别计费',
+  },
+]

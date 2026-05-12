@@ -1,0 +1,19 @@
+# Least-privilege sudoers rules for Game Video Tool blue/green releases.
+# Install with visudo, for example:
+#   visudo -f /etc/sudoers.d/game-video-zero-downtime
+#
+# Do not grant deploy generic sudo. Keep this file limited to exact commands.
+
+Cmnd_Alias GAME_VIDEO_SYSTEMD = \
+  /usr/bin/systemctl start game-video-tool@57991.service, \
+  /usr/bin/systemctl start game-video-tool@57992.service, \
+  /usr/bin/systemctl restart game-video-tool@57991.service, \
+  /usr/bin/systemctl restart game-video-tool@57992.service, \
+  /usr/bin/systemctl stop game-video-tool@57991.service, \
+  /usr/bin/systemctl stop game-video-tool@57992.service
+
+Cmnd_Alias GAME_VIDEO_SWITCH = \
+  /usr/local/sbin/game-video-switch-upstream 57991, \
+  /usr/local/sbin/game-video-switch-upstream 57992
+
+deploy ALL=(root) NOPASSWD: GAME_VIDEO_SYSTEMD, GAME_VIDEO_SWITCH

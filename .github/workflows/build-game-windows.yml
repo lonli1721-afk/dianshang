@@ -1,0 +1,110 @@
+name: Build Game Video Tool (Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'game-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-game-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: react-ui/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        working-directory: react-ui
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: react-ui
+        run: npm run build
+
+      - name: Copy frontend to server/static
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force server/static -ErrorAction SilentlyContinue
+          Copy-Item -Recurse react-ui/dist server/static
+
+      - name: Install Python dependencies
+        working-directory: server
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Build Python sidecar
+        working-directory: server
+        run: python build_sidecar.py
+
+      - name: Build Tauri app (Game mode, NSIS only)
+        shell: bash
+        run: |
+          ./react-ui/node_modules/.bin/tauri build --bundles nsis \
+            --config src-tauri/tauri.game.conf.json \
+            --config '{"build":{"beforeBuildCommand":"","beforeDevCommand":""}}'
+        env:
+          CI: true
+          WANPI_APP_MODE: game
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameVideoTool-Windows-Installer
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          retention-days: 30
+
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          VER=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.game.conf.json', encoding='utf-8'))['version'])")
+          echo "version=game-v${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: "游戏视频素材工具 ${{ steps.version.outputs.version }}"
+          files: src-tauri/target/release/bundle/nsis/*.exe
+          draft: false
+
+  upload-to-cloud:
+    needs: build-game-windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: GameVideoTool-Windows-Installer
+          path: installer
+
+      - name: Upload to cloud server
+        env:
+          SERVER_PASS: ${{ secrets.SERVER_PASS }}
+        run: |
+          EXE_FILE=$(ls installer/*.exe | head -1)
+          if [ -z "$EXE_FILE" ]; then echo "No exe found"; exit 0; fi
+          sudo apt-get install -y sshpass > /dev/null 2>&1
+          sshpass -p "$SERVER_PASS" scp -o StrictHostKeyChecking=no "$EXE_FILE" root@8.166.133.176:/opt/pieceai-clone/server/installers/GameVideoTool.exe
+          echo "Uploaded $(basename $EXE_FILE) to cloud server"

@@ -1,0 +1,22 @@
+[Unit]
+Description=Game Video Tool FastAPI Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/home/deploy/game-video-tool
+EnvironmentFile=/home/deploy/game-video-tool/.env
+Environment=USER_DATA_DIR=/home/deploy/game-video-data
+Environment=AUTH_ENABLED=true
+Environment=UI_DIST_DIR=/home/deploy/game-video-tool/react-ui/dist
+ExecStart=/home/deploy/game-video-tool/.venv/bin/python server/main.py --port 57991 --host 127.0.0.1
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/deploy/game-video-tool/app.log
+StandardError=append:/home/deploy/game-video-tool/app.log
+
+[Install]
+WantedBy=multi-user.target

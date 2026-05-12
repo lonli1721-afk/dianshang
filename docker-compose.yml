@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    container_name: game-video-tool
+    restart: unless-stopped
+    ports:
+      - "57991:57991"
+    volumes:
+      - /opt/game-video-data:/data
+    environment:
+      - USER_DATA_DIR=/data
+      - AUTH_ENABLED=true
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
+      - HK_PROXY_URL=${HK_PROXY_URL:-}
+      - JWT_SECRET=${JWT_SECRET:?请在 .env 文件中设置 JWT_SECRET}

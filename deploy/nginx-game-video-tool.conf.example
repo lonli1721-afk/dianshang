@@ -1,0 +1,87 @@
+# Example nginx server for Game Video Tool production.
+# Copy to /etc/nginx/sites-available/ and adjust server_name, cert paths, and ports.
+# This file intentionally contains no secrets.
+
+upstream game_video_tool_api {
+    server 127.0.0.1:57991;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    server_name example.com;
+
+    root /home/deploy/game-video-tool/react-ui/dist;
+    index index.html;
+
+    client_max_body_size 2g;
+
+    gzip on;
+    gzip_comp_level 5;
+    gzip_min_length 1024;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_types
+        text/css
+        text/html
+        text/javascript
+        application/javascript
+        application/json
+        application/svg+xml
+        image/svg+xml;
+
+    location /api/ {
+        proxy_pass http://game_video_tool_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_buffering off;
+    }
+
+    location /public-files/ {
+        proxy_pass http://game_video_tool_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
+    location = /health {
+        proxy_pass http://game_video_tool_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /assets/ {
+        try_files $uri =404;
+        access_log off;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+    }
+
+    location ~* \.(?:mp4|mov|m4v|webm|avi|mkv)$ {
+        try_files $uri =404;
+        gzip off;
+        add_header Cache-Control "public, max-age=86400" always;
+    }
+
+    location = /index.html {
+        try_files $uri =404;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+        add_header Cache-Control "no-cache" always;
+    }
+}

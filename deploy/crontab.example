@@ -1,0 +1,45 @@
+# Example crontab entries for the deploy user.
+# Review and merge with `crontab -e`; do not blindly replace an existing crontab.
+# Adjust paths before use. This file intentionally contains no secrets.
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+APP_DIR=/home/deploy/game-video-tool
+GAME_VIDEO_DATA_DIR=/home/deploy/game-video-data
+GAME_VIDEO_BACKUP_DIR=/home/deploy/game-video-backups
+GAME_VIDEO_DB_BACKUP_RETENTION_DAYS=7
+GAME_VIDEO_DB_BACKUP_RETENTION_COUNT=24
+GAME_VIDEO_CLOUD_DBS_KEEP_COUNT=200
+
+# Daily lightweight DB backup only. Do not cron full media backups on the system disk.
+15 3 * * * cd $APP_DIR && deploy/backup-game-video-dbs.sh >> $GAME_VIDEO_BACKUP_DIR/db-backup.cron.log 2>&1
+
+# Storage lifecycle dry-run report. Review reports before adding --execute.
+30 3 * * * cd $APP_DIR && deploy/storage-lifecycle.py --json-report $GAME_VIDEO_BACKUP_DIR/storage-summary.latest.json summary > $GAME_VIDEO_BACKUP_DIR/storage-summary.latest.txt 2>&1
+35 3 * * * cd $APP_DIR && deploy/storage-lifecycle.py --json-report $GAME_VIDEO_BACKUP_DIR/cloud-dbs-dry-run.latest.json cleanup-cloud-dbs --keep-count $GAME_VIDEO_CLOUD_DBS_KEEP_COUNT > $GAME_VIDEO_BACKUP_DIR/cloud-dbs-dry-run.latest.txt 2>&1
+40 3 * * * cd $APP_DIR && deploy/health-report.py --json-report $GAME_VIDEO_BACKUP_DIR/health-report.latest.json > $GAME_VIDEO_BACKUP_DIR/health-report.latest.txt 2>&1
+
+# Server-side hourly health watch. This is the preferred long-running monitor:
+# it does not depend on a local laptop/Codex automation staying awake.
+0 * * * * mkdir -p $GAME_VIDEO_BACKUP_DIR/health-watch && cd $APP_DIR && deploy/server-health-watch.py --report-dir $GAME_VIDEO_BACKUP_DIR/health-watch > $GAME_VIDEO_BACKUP_DIR/health-watch/health-watch-latest.stdout 2>&1
+
+# Short interval stale task watch. This is read-only and writes tiny reports only;
+# it never repairs tasks, calls provider APIs, restarts services, or writes DBs.
+*/5 * * * * mkdir -p $GAME_VIDEO_BACKUP_DIR/task-stale-watch && cd $APP_DIR && deploy/task-stale-watch.py --data-dir $GAME_VIDEO_DATA_DIR --stale-seconds 300 --critical-count 1 --report-dir $GAME_VIDEO_BACKUP_DIR/task-stale-watch > $GAME_VIDEO_BACKUP_DIR/task-stale-watch/task-stale-watch-latest.stdout 2>&1
+
+# Hourly task failure report. Read-only aggregation by provider/model/user/error category.
+5 * * * * mkdir -p $GAME_VIDEO_BACKUP_DIR/task-failure-report && cd $APP_DIR && deploy/task-failure-report.py --data-dir $GAME_VIDEO_DATA_DIR --since-hours 24 --report-dir $GAME_VIDEO_BACKUP_DIR/task-failure-report > $GAME_VIDEO_BACKUP_DIR/task-failure-report/task-failure-report-latest.stdout 2>&1
+
+# Disk guard: exit code 1 means warn; 2 means block high-risk operations until cleaned.
+*/30 * * * * cd $APP_DIR && deploy/disk-guard.sh > $GAME_VIDEO_BACKUP_DIR/disk-guard.latest.txt 2>&1
+
+# Lightweight application log rotation: trims app.log when it grows beyond the script threshold.
+*/15 * * * * cd $APP_DIR && deploy/rotate-app-log.sh >> $APP_DIR/app-log-rotate.cron.log 2>&1
+
+# Read-only production inspection snapshot for handoff/troubleshooting.
+45 8 * * * cd $APP_DIR && deploy/production-inspect.sh > $GAME_VIDEO_BACKUP_DIR/production-inspect.latest.txt 2>&1
+
+# R3-only manual full media backup. Run only before high-risk migrations/releases,
+# and keep at most one local full backup unless it has been moved off the system disk:
+# cd $APP_DIR && GAME_VIDEO_BACKUP_RETENTION_COUNT=1 deploy/backup-game-video-data.sh
