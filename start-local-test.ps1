@@ -101,7 +101,8 @@ cd '$ServerDir'
 "@
 
 $frontendCommand = @"
-`$env:VITE_API_URL='http://127.0.0.1:$ApiPort'
+Remove-Item Env:VITE_API_URL -ErrorAction SilentlyContinue
+`$env:VITE_PROXY_TARGET='http://127.0.0.1:$ApiPort'
 cd '$WebDir'
 npm run dev -- --host 127.0.0.1 --port $WebPort
 "@
