@@ -55,6 +55,7 @@ function Find-RealPython {
 }
 
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+Set-Content -Path (Join-Path $WebDir ".env.local") -Value "VITE_API_URL=http://127.0.0.1:$ApiPort" -Encoding UTF8
 
 if ((Test-Path $VenvDir) -and -not (Test-Path $VenvPython)) {
   Write-Host "Removing incomplete Python virtual environment..."
