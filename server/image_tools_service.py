@@ -103,6 +103,14 @@ class ReversePromptsRequest(BaseModel):
     model: str = "gemini-2.5-flash"
 
 
+class MultimodalAnalysisRequest(BaseModel):
+    image_urls: list[str] = Field(default_factory=list)
+    video_urls: list[str] = Field(default_factory=list)
+    prompt: str = ""
+    mode: str = "素材反推"
+    model: str = "doubao-seed-2-0-pro-260215"
+
+
 class ReverseStylePromptRequest(BaseModel):
     image_url: str = ""
     model: str = "gemini-2.5-flash"
@@ -198,6 +206,21 @@ JIANYING_FONT_KEYWORDS = (
 _local_image_semaphores: dict[int, asyncio.Semaphore] = {}
 _provider_registry = get_image_tool_provider_registry()
 _image_tool_task_runners: dict[str, asyncio.Task] = {}
+
+ARK_MULTIMODAL_MODELS = [
+    {
+        "id": "doubao-seed-2-0-pro-260215",
+        "name": "Doubao Seed 2.0 Pro 多模态",
+        "enabled": True,
+        "capabilities": ["image", "video", "text"],
+        "note": "已验证可用，适合图片反推、视频反推、视频分析。",
+    },
+]
+ARK_MULTIMODAL_MODEL_IDS = {item["id"] for item in ARK_MULTIMODAL_MODELS if item.get("enabled")}
+
+
+def _is_ark_multimodal_model(model: str) -> bool:
+    return (model or "").strip() in ARK_MULTIMODAL_MODEL_IDS
 
 
 def _local_image_semaphore() -> asyncio.Semaphore:
@@ -1469,6 +1492,173 @@ def _reverse_generation_prompt_from_parts(
     return "；".join(parts)
 
 
+def list_multimodal_analysis_models() -> dict:
+    return {"models": ARK_MULTIMODAL_MODELS, "default_model": "doubao-seed-2-0-pro-260215"}
+
+
+def _ark_api_key() -> str:
+    group_value = deps.get_group_api_key("ark_api_key")
+    if group_value:
+        return group_value
+    candidates = ("game_ark_api_key", "ark_api_key", "game_jimeng_api_key", "jimeng_api_key")
+    for name in candidates:
+        value = (db.get_user_setting(name, "") or "").strip()
+        if value:
+            return value
+    for name in candidates:
+        value = (deps.settings_manager.get(name, "") or "").strip()
+        if value:
+            return value
+    env_candidates = ("GAME_ARK_API_KEY", "ARK_API_KEY", "GAME_JIMENG_API_KEY", "JIMENG_API_KEY")
+    for name in env_candidates:
+        value = (os.environ.get(name, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _multimodal_analysis_prompt(req: MultimodalAnalysisRequest) -> str:
+    custom = (req.prompt or "").strip()
+    mode = (req.mode or "素材反推").strip()
+    base = (
+        "你是游戏广告素材分析师，请对用户提供的图片/视频做中文分析。"
+        "请只返回一个 JSON object，不要 Markdown，不要解释代码块。"
+        "字段必须包含："
+        "{\"summary\":\"一句话总结\","
+        "\"visual_description\":\"画面/视频内容描述\","
+        "\"subject\":\"主体\","
+        "\"scene\":\"场景\","
+        "\"style\":\"画风/视觉风格\","
+        "\"camera\":\"镜头/构图/运镜\","
+        "\"actions\":[\"动作或事件\"],"
+        "\"selling_points\":[\"素材爆点\"],"
+        "\"generation_prompt\":\"可复用中文生成提示词\","
+        "\"negative_prompt\":\"生成时应避免的内容\","
+        "\"timeline\":[{\"time\":\"时间点或片段\",\"event\":\"发生内容\"}],"
+        "\"risk_notes\":[\"风险或不确定点\"]}。"
+        "要求：如果是视频，要尽量拆解时间线、角色动作、镜头变化和可复用分镜；"
+        "如果是图片，要重点反推主体、场景、画风、构图、色彩、材质和生图提示词。"
+    )
+    if custom:
+        base += f"\n用户额外要求：{custom}"
+    base += f"\n分析模式：{mode}"
+    return base
+
+
+async def multimodal_analysis(req: MultimodalAnalysisRequest) -> dict:
+    model = (req.model or "doubao-seed-2-0-pro-260215").strip()
+    if model not in ARK_MULTIMODAL_MODEL_IDS:
+        raise HTTPException(400, f"当前只开放已验证可用的火山多模态模型：{', '.join(sorted(ARK_MULTIMODAL_MODEL_IDS))}。")
+    image_urls = [url for url in dict.fromkeys(req.image_urls or []) if str(url or "").strip()]
+    video_urls = [url for url in dict.fromkeys(req.video_urls or []) if str(url or "").strip()]
+    if not image_urls and not video_urls:
+        raise HTTPException(400, "请至少上传 1 张图片或 1 个视频后再分析。")
+    if len(image_urls) > 8:
+        raise HTTPException(400, "单次最多分析 8 张图片。")
+    if len(video_urls) > 2:
+        raise HTTPException(400, "单次最多分析 2 个视频。")
+    api_key = _ark_api_key()
+    if not api_key:
+        raise HTTPException(400, "ARK API Key 未配置，请先到设置里配置火山引擎 ARK Key。")
+
+    content: list[dict] = []
+    for url in image_urls:
+        data, ext = await _read_image_bytes(url)
+        mime = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".png": "image/png",
+        }.get(ext, "image/png")
+        b64 = base64.b64encode(data).decode()
+        content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+    for url in video_urls:
+        resolved = await deps.resolve_video_for_external(url)
+        content.append({"type": "video_url", "video_url": {"url": resolved}})
+    content.append({"type": "text", "text": _multimodal_analysis_prompt(req)})
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": 4096,
+    }
+
+    async def _call():
+        async with httpx.AsyncClient(timeout=180) as client:
+            resp = await client.post(
+                "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+            )
+            if resp.status_code >= 400:
+                try:
+                    err = resp.json()
+                    msg = err.get("error", {}).get("message") or err.get("message") or resp.text
+                except Exception:
+                    msg = resp.text
+                if "not activated" in msg or "not have access" in msg:
+                    raise HTTPException(403, f"火山模型未开通或无权限：{msg[:300]}")
+                raise HTTPException(resp.status_code, f"火山多模态分析失败：{msg[:300]}")
+            return resp.json()
+
+    data = await run_provider_call("ark", "image_tools_multimodal_analysis", _call)
+    message = (data.get("choices") or [{}])[0].get("message") or {}
+    text = message.get("content") or ""
+    parsed = deps.extract_json(text)
+    return {
+        "ok": True,
+        "model": model,
+        "mode": req.mode,
+        "image_count": len(image_urls),
+        "video_count": len(video_urls),
+        "result": parsed if isinstance(parsed, dict) else None,
+        "text": text,
+        "usage": data.get("usage", {}),
+    }
+
+
+async def _ark_chat_completion(
+    *,
+    model: str,
+    content: list[dict] | str,
+    operation: str,
+    max_completion_tokens: int = 2048,
+) -> str:
+    api_key = _ark_api_key()
+    if not api_key:
+        raise HTTPException(400, "ARK API Key 未配置，请先到设置里配置火山引擎 ARK Key。")
+    if isinstance(content, str):
+        message_content = content
+    else:
+        message_content = content
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": message_content}],
+        "max_tokens": max_completion_tokens,
+    }
+
+    async def _call():
+        async with httpx.AsyncClient(timeout=180) as client:
+            resp = await client.post(
+                "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+            )
+            if resp.status_code >= 400:
+                try:
+                    err = resp.json()
+                    msg = err.get("error", {}).get("message") or err.get("message") or resp.text
+                except Exception:
+                    msg = resp.text
+                if "not activated" in msg or "not have access" in msg:
+                    raise HTTPException(403, f"火山模型未开通或无权限：{msg[:300]}")
+                raise HTTPException(resp.status_code, f"火山模型请求失败：{msg[:300]}")
+            return resp.json()
+
+    data = await run_provider_call("ark", operation, _call)
+    return str((data.get("choices") or [{}])[0].get("message", {}).get("content") or "")
+
+
 async def _reverse_one(url: str, model: str) -> dict:
     data, ext = await _read_image_bytes(url)
     mime = {
@@ -1491,7 +1681,18 @@ async def _reverse_one(url: str, model: str) -> dict:
         "negative_prompt 必须包含无文字、无水印、无 logo、无 UI、无边框、不要风格漂移。"
     )
 
-    if deps.is_openai_model(model):
+    if _is_ark_multimodal_model(model):
+        b64 = base64.b64encode(data).decode()
+        text = await _ark_chat_completion(
+            model=model,
+            operation="image_tools_reverse_prompt",
+            max_completion_tokens=2048,
+            content=[
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                {"type": "text", "text": prompt},
+            ],
+        )
+    elif deps.is_openai_model(model):
         svc = _provider_registry.openai()
         if not svc:
             raise HTTPException(400, "OpenAI API Key 未配置，请先到设置里配置。")
@@ -1607,6 +1808,13 @@ async def reverse_style_prompt(req: ReverseStylePromptRequest) -> dict:
 
 async def _chat_prompt_model(model: str, prompt: str, operation: str) -> str:
     selected_model = model or "gemini-2.5-flash"
+    if _is_ark_multimodal_model(selected_model):
+        return await _ark_chat_completion(
+            model=selected_model,
+            content=prompt,
+            operation=operation,
+            max_completion_tokens=1600,
+        )
     if deps.is_openai_model(selected_model):
         svc = _provider_registry.openai()
         if not svc:

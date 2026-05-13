@@ -9,6 +9,7 @@ from image_tools_service import (
     DeriveRequest,
     GenerateNineRequest,
     ImageToolTaskRequest,
+    MultimodalAnalysisRequest,
     PromptPolishRequest,
     ReversePromptsRequest,
     ReverseStylePromptRequest,
@@ -23,7 +24,9 @@ from image_tools_service import (
     generate_nine_images,
     get_image_tool_task,
     list_image_tool_tasks,
+    list_multimodal_analysis_models,
     list_watermark_fonts,
+    multimodal_analysis,
     polish_generation_prompt,
     prepare_derive_request,
     prepare_generate_nine_request,
@@ -156,5 +159,18 @@ async def reverse_prompts(req: ReversePromptsRequest):
 
     async def _do():
         return await reverse_prompt_batch(prepared)
+
+    return deps.keepalive_response(_do)
+
+
+@router.get("/multimodal-analysis/models")
+async def multimodal_analysis_models():
+    return list_multimodal_analysis_models()
+
+
+@router.post("/multimodal-analysis")
+async def analyze_multimodal(req: MultimodalAnalysisRequest):
+    async def _do():
+        return await multimodal_analysis(req)
 
     return deps.keepalive_response(_do)

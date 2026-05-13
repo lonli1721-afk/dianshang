@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -27,10 +28,16 @@ router = APIRouter()
 
 MAX_VIRAL_VIDEO_COUNT = max(1, int(os.environ.get("VIRAL_MAX_VIDEO_COUNT", "6") or "6"))
 MAX_OPENAI_FRAMES_PER_VIDEO = max(2, int(os.environ.get("VIRAL_OPENAI_FRAMES_PER_VIDEO", "5") or "5"))
+ARK_MULTIMODAL_MODEL_ID = "doubao-seed-2-0-pro-260215"
 _ai_service_cache: dict[tuple[str, tuple[str, ...]], object] = {}
 _ai_service_cache_lock = threading.RLock()
 
 VIRAL_MODELS = [
+    {
+        "id": "doubao-seed-2-0-pro-260215",
+        "name": "火山 Doubao Seed 2.0 Pro",
+        "provider": "ark",
+    },
     {
         "id": "gemini-3.1-pro-preview",
         "name": "Gemini 3.1 Pro",
@@ -234,6 +241,9 @@ def _env_key_pool(name: str) -> list[str]:
 
 def _user_key(name: str) -> str:
     candidates = [f"game_{name}", name]
+    group_value = deps.get_group_api_key(name)
+    if group_value:
+        return group_value
     for key in candidates:
         val = db.get_user_setting(key, "")
         if val:
@@ -254,6 +264,11 @@ def _user_key_pool(name: str) -> list[str]:
     from ai_service import split_api_keys
     keys: list[str] = []
     seen: set[str] = set()
+
+    for key in deps.get_group_api_key_pool(name):
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
 
     for key_name in candidates:
         for key in split_api_keys(db.get_user_setting(key_name, "")):
@@ -302,6 +317,53 @@ def _openai():
     elif not base_url:
         base_url = "https://open-api.mincode.cn/v1"
     return OpenAIService(api_key=key, base_url=base_url)
+
+
+def _is_ark_multimodal_model(model: str) -> bool:
+    return (model or "").strip() == ARK_MULTIMODAL_MODEL_ID
+
+
+def _ark_api_key() -> str:
+    for name in ("ark_api_key", "jimeng_api_key"):
+        value = (_user_key(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+async def _ark_chat_completion(
+    *,
+    content: list[dict] | str,
+    operation: str,
+    max_completion_tokens: int = 4096,
+) -> str:
+    api_key = _ark_api_key()
+    if not api_key:
+        raise HTTPException(400, "ARK API Key 未配置，请在设置页配置火山引擎 ARK Key 后重试。")
+    payload = {
+        "model": ARK_MULTIMODAL_MODEL_ID,
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": max_completion_tokens,
+    }
+
+    async def _call():
+        async with httpx.AsyncClient(timeout=180) as client:
+            resp = await client.post(
+                "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+            )
+            if resp.status_code >= 400:
+                try:
+                    err = resp.json()
+                    msg = err.get("error", {}).get("message") or err.get("message") or resp.text
+                except Exception:
+                    msg = resp.text
+                raise HTTPException(resp.status_code, f"火山模型请求失败：{msg[:300]}")
+            return resp.json()
+
+    data = await _provider_call("ark", operation, _call)
+    return str((data.get("choices") or [{}])[0].get("message", {}).get("content") or "")
 
 
 async def _provider_call(provider: str, operation: str, fn):
@@ -481,6 +543,14 @@ async def _read_video_bytes(url: str) -> tuple[bytes, str, str]:
 
 async def _call_viral_model(prompt: str, model: str, video_urls: list[str]) -> str:
     selected_model = model or "gemini-2.5-flash"
+    if _is_ark_multimodal_model(selected_model):
+        content: list[dict] = []
+        for url in video_urls:
+            video_bytes, mime, _ext = await _read_video_bytes(url)
+            b64 = base64.b64encode(video_bytes).decode()
+            content.append({"type": "video_url", "video_url": {"url": f"data:{mime};base64,{b64}"}})
+        content.append({"type": "text", "text": f"{prompt}\n\n以上媒体按上传顺序排列，请结合视频顺序判断节奏、玩法和爆点。"})
+        return await _ark_chat_completion(content=content, operation="viral_video_analysis")
     if deps.is_openai_model(selected_model):
         svc = _openai()
         if not svc:
@@ -525,6 +595,8 @@ async def _call_viral_model(prompt: str, model: str, video_urls: list[str]) -> s
 
 async def _call_text_model(prompt: str, model: str) -> str:
     selected_model = model or "gemini-2.5-flash"
+    if _is_ark_multimodal_model(selected_model):
+        return await _ark_chat_completion(content=prompt, operation="viral_text", max_completion_tokens=4096)
     if deps.is_openai_model(selected_model):
         svc = _openai()
         if not svc:

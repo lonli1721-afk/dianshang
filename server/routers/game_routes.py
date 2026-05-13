@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import uuid
 import json
@@ -43,6 +44,7 @@ router = APIRouter()
 
 FRAME_EXTRACTION_CONCURRENCY = max(1, int(os.environ.get("FRAME_EXTRACTION_CONCURRENCY", "2") or "2"))
 FRAME_EXTRACTION_TIMEOUT_SECONDS = max(5, int(os.environ.get("FRAME_EXTRACTION_TIMEOUT_SECONDS", "45") or "45"))
+ARK_MULTIMODAL_MODEL_ID = "doubao-seed-2-0-pro-260215"
 DEFAULT_FRAME_EXTRACTION_COUNT = max(8, int(os.environ.get("FRAME_EXTRACTION_COUNT", "10") or "10"))
 SEEDANCE_REFERENCE_VIDEO_LIMIT_SECONDS = 15.2
 TASK_STATUS_QUERY_CONCURRENCY = max(1, int(os.environ.get("GAME_TASK_STATUS_QUERY_CONCURRENCY", "4") or "4"))
@@ -136,6 +138,10 @@ def _user_key(name: str) -> str:
     """Read a game API key from user settings, local settings, or environment."""
     candidates = [f"game_{name}", name]
 
+    group_value = deps.get_group_api_key(name)
+    if group_value:
+        return group_value
+
     for key in candidates:
         val = db.get_user_setting(key, "")
         if val:
@@ -158,6 +164,11 @@ def _user_key_pool(name: str) -> list[str]:
     from ai_service import split_api_keys
     keys: list[str] = []
     seen: set[str] = set()
+
+    for key in deps.get_group_api_key_pool(name):
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
 
     for key_name in candidates:
         val = db.get_user_setting(key_name, "")
@@ -307,7 +318,57 @@ def _openai():
     return OpenAIService(api_key=k, base_url=base_url)
 
 
+def _is_ark_multimodal_model(model: str) -> bool:
+    return (model or "").strip() == ARK_MULTIMODAL_MODEL_ID
+
+
+def _ark_api_key() -> str:
+    for name in ("ark_api_key", "jimeng_api_key"):
+        value = (_user_key(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+async def _ark_chat_completion(
+    *,
+    content: list[dict] | str,
+    operation: str,
+    max_completion_tokens: int = 2048,
+) -> str:
+    api_key = _ark_api_key()
+    if not api_key:
+        raise Exception("ARK API Key 未配置，请在设置页面配置火山引擎 ARK Key。")
+    payload = {
+        "model": ARK_MULTIMODAL_MODEL_ID,
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": max_completion_tokens,
+    }
+
+    async def _call():
+        import httpx as _httpx
+        async with _httpx.AsyncClient(timeout=180) as client:
+            resp = await client.post(
+                "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+            )
+            if resp.status_code >= 400:
+                try:
+                    err = resp.json()
+                    msg = err.get("error", {}).get("message") or err.get("message") or resp.text
+                except Exception:
+                    msg = resp.text
+                raise Exception(f"火山模型请求失败：{msg[:300]}")
+            return resp.json()
+
+    data = await _provider_call("ark", operation, _call)
+    return str((data.get("choices") or [{}])[0].get("message", {}).get("content") or "")
+
+
 async def _llm_chat(prompt: str, model: str, conversation_id: str = "", max_tokens: int = 8192) -> str:
+    if _is_ark_multimodal_model(model):
+        return await _ark_chat_completion(content=prompt, operation="llm_chat", max_completion_tokens=min(max_tokens, 4096))
     if deps.is_openai_model(model):
         svc = _openai()
         if not svc:
@@ -377,6 +438,19 @@ async def _prompt_multimodal_chat(
     timeout: int = 120,
 ) -> str:
     primary_model = model or "gemini-2.5-flash"
+    if _is_ark_multimodal_model(primary_model):
+        content: list[dict] = []
+        for image_bytes, mime in image_refs:
+            b64 = base64.b64encode(image_bytes).decode()
+            content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+        for video_bytes, mime, _ext in video_refs:
+            b64 = base64.b64encode(video_bytes).decode()
+            content.append({"type": "video_url", "video_url": {"url": f"data:{mime};base64,{b64}"}})
+        content.append({"type": "text", "text": text_prompt})
+        return await asyncio.wait_for(
+            _ark_chat_completion(content=content, operation="prompt_multimodal_chat", max_completion_tokens=2048),
+            timeout=timeout,
+        )
     svc = _ai()
     if not svc:
         svc = None
@@ -473,6 +547,8 @@ def _friendly_ai_error(exc: Exception) -> str:
 
 
 def _prompt_provider(model: str) -> str:
+    if _is_ark_multimodal_model(model or ""):
+        return "ark"
     return "openai" if deps.is_openai_model(model or "") else "gemini"
 
 
@@ -1057,8 +1133,12 @@ async def refresh_prompt(req: RefreshPromptRequest):
 async def analyze_video(req: AnalyzeVideoRequest):
     """Reverse-engineer a video generation prompt using Gemini or GPT vision."""
     is_openai = deps.is_openai_model(req.model)
+    is_ark = _is_ark_multimodal_model(req.model)
 
-    if is_openai:
+    if is_ark:
+        if not _ark_api_key():
+            raise HTTPException(400, "ARK API Key 未配置，请在设置页面配置火山引擎 ARK Key。")
+    elif is_openai:
         if not deps.openai_service:
             raise HTTPException(400, "OpenAI API key is not configured")
     else:
@@ -1093,7 +1173,18 @@ async def analyze_video(req: AnalyzeVideoRequest):
             )
             system_prompt = _chinese_prompt_request(system_prompt)
 
-            if is_openai:
+            if is_ark:
+                b64 = base64.b64encode(video_bytes).decode()
+                prompt = await _ark_chat_completion(
+                    operation="analyze_video",
+                    max_completion_tokens=2048,
+                    content=[
+                        {"type": "video_url", "video_url": {"url": f"data:{mime};base64,{b64}"}},
+                        {"type": "text", "text": system_prompt},
+                    ],
+                )
+                prompt = prompt.strip()
+            elif is_openai:
                 frames = await _extract_video_frames(video_bytes, ext)
                 result = await _provider_call(
                     "openai",
@@ -1756,7 +1847,7 @@ async def list_project_tasks(project_id: str, limit: int = 50):
 # Game-specific settings
 GAME_SETTING_KEYS = [
     "game_gemini_api_key", "game_gemini_api_keys", "game_ark_api_key", "game_vidu_api_key",
-    "game_dashscope_api_key",
+    "game_dashscope_api_key", "game_api_usage_group",
 ]
 
 class GameSettingRequest(BaseModel):
@@ -1767,9 +1858,14 @@ class GameSettingRequest(BaseModel):
 async def get_game_settings():
     result = {}
     for k in GAME_SETTING_KEYS:
+        if k == "game_api_usage_group":
+            result[k] = await _db_call(db.get_user_setting, k, "")
+            continue
         base_key = k.removeprefix("game_")
         v = await _db_call(db.get_user_setting, k, "") or _user_key(base_key)
         result[k] = ("*" * 8 + v[-4:]) if v and len(v) > 4 else ("***" if v else "")
+    result["api_usage_groups"] = deps.get_api_usage_groups()
+    result["resolved_api_usage_group"] = deps.current_api_usage_group()
     return result
 
 @router.post("/settings")
@@ -1777,6 +1873,8 @@ async def set_game_setting(req: GameSettingRequest):
     if req.key not in GAME_SETTING_KEYS:
         raise HTTPException(400, f"不支持的设置项: {req.key}")
     v = req.value.strip()
+    if req.key == "game_api_usage_group":
+        v = deps.normalize_api_usage_group(v)
     await _db_call(db.set_user_setting, req.key, v)
     logger.info("Game setting updated (per-user): %s", req.key)
     return {"ok": True}

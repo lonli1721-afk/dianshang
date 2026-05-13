@@ -198,6 +198,7 @@ PUBLIC_PREFIXES = ("/api/files/",)
 
 def _apply_user_context(request: Request, payload: dict) -> None:
     request.state.user = payload
+    deps.set_current_user(payload)
     user_id = payload.get("sub", "")
     if user_id:
         user_db_path = auth.get_user_db_path(user_id)
@@ -210,6 +211,7 @@ def _apply_user_context(request: Request, payload: dict) -> None:
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        deps.set_current_user(None)
         if request.method == "OPTIONS":
             return await call_next(request)
         if not AUTH_ENABLED:

@@ -25,6 +25,8 @@ import {
   cleanImageModelLabel,
   getImageQualityIds,
   getReplaceProviderSpec,
+  getReplaceReferenceDurationLimits,
+  getReplaceVideoBlockReason,
   getReplaceReferenceDurationHint,
   getVideoPricePerSecond,
   getVideoGenerationBlockReasonForModel,
@@ -66,7 +68,16 @@ import SettingsPanel from './components/SettingsPanel'
 import WorkbenchTabs from './components/WorkbenchTabs'
 import {
   ChevronLeft,
+  Download,
+  Loader2,
+  Plus,
+  RefreshCw,
   Settings,
+  Trash2,
+  Upload,
+  User,
+  Video,
+  X,
 } from 'lucide-react'
 
 export default function GameVideoPage() {
@@ -89,6 +100,7 @@ export default function GameVideoPage() {
 
   const [genScenes, setGenScenes] = useState([])
   const [replScenes, setReplScenes] = useState([])
+  const [replaceBatchItems, setReplaceBatchItems] = useState([])
   const [activeTab, setActiveTab] = useState('generate')
   const [newProjectName, setNewProjectName] = useState('')
   const [showNewProject, setShowNewProject] = useState(false)
@@ -363,6 +375,128 @@ export default function GameVideoPage() {
 
   const preventFocusLoss = (e) => { e.preventDefault() }
 
+  const updateReplaceBatchItem = useCallback((id, updates) => {
+    setReplaceBatchItems(prev => prev.map(item => (item.id === id ? { ...item, ...updates } : item)))
+  }, [])
+
+  const addReplaceBatchReferenceVideos = useCallback(async (files) => {
+    const list = Array.from(files || [])
+    if (!list.length) return
+    const referenceLimits = getReplaceReferenceDurationLimits(replProvider)
+    const accepted = []
+    for (const file of list) {
+      const uploaded = await uploadSingleFileWithFeedback(file, '参考视频上传失败')
+      if (!uploaded) continue
+      const checked = await validateReferenceVideoUpload(uploaded, {
+        label: '参考视频',
+        minSeconds: referenceLimits.minSeconds,
+        maxSeconds: referenceLimits.maxSeconds,
+        providerLabel: getReplaceProviderSpec(replProvider).providerLabel,
+      })
+      if (!checked) continue
+      accepted.push({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        name: checked.name || file.name,
+        refVideo: checked.url,
+        durationSeconds: checked.durationSeconds,
+        status: 'idle',
+        taskId: '',
+        error: '',
+        videoUrl: '',
+        startTime: null,
+      })
+    }
+    if (accepted.length) {
+      setReplaceBatchItems(prev => [...prev, ...accepted])
+    }
+  }, [
+    replProvider,
+    uploadSingleFileWithFeedback,
+  ])
+
+  const removeReplaceBatchItem = useCallback((id) => {
+    setReplaceBatchItems(prev => prev.filter(item => item.id !== id))
+  }, [])
+
+  const clearReplaceBatchItems = useCallback(() => {
+    setReplaceBatchItems([])
+  }, [])
+
+  const runOneReplaceBatchItem = useCallback(async (item) => {
+    if (!replCharImage || !item?.refVideo) return
+    const blockReason = getReplaceVideoBlockReason(replProvider, {
+      charImage: replCharImage,
+      refVideo: item.refVideo,
+      refVideoDurationSeconds: item.durationSeconds,
+    }, {
+      formatDurationSeconds,
+      normalizeDurationSeconds,
+    })
+    if (blockReason) {
+      updateReplaceBatchItem(item.id, { status: 'failed', error: blockReason, taskId: '', startTime: null })
+      return
+    }
+    const startTime = Date.now()
+    updateReplaceBatchItem(item.id, { status: 'processing', error: '', taskId: '', startTime })
+    try {
+      const result = await api.post('/api/game/replace_video', {
+        project_id: currentProject?.id || '',
+        ref_video_url: item.refVideo,
+        character_ref: replCharImage.url,
+        prompt: replPrompt,
+        provider: replProvider,
+        mode: replProvider === 'wan' ? replWanMode : '',
+        check_image: replProvider === 'wan' ? replWanCheckImage : false,
+        resolution: replProvider === 'jimeng' ? replVideoResolution : '720p',
+      })
+      if (result.task_record_warning) alert(result.task_record_warning)
+      if (result.task_id) {
+        updateReplaceBatchItem(item.id, { taskId: result.task_id, status: 'processing' })
+        registerTaskPolling(result.task_id, (upd) => {
+          if (upd.status === 'completed' && upd.videoUrl) {
+            updateReplaceBatchItem(item.id, { status: 'completed', videoUrl: upd.videoUrl, error: '', taskId: '', startTime: null })
+          } else if (upd.status === 'failed') {
+            updateReplaceBatchItem(item.id, { status: 'failed', error: formatProviderVideoCacheError(upd.error || '替换失败'), taskId: result.task_id, startTime: null })
+          } else if (upd.status === 'completed' && !upd.videoUrl) {
+            updateReplaceBatchItem(item.id, { status: 'failed', error: formatProviderVideoCacheError(upd.error || '任务已完成但未返回视频'), taskId: result.task_id, startTime: null })
+          }
+        })
+      }
+    } catch (error) {
+      updateReplaceBatchItem(item.id, { status: 'failed', error: getErrorMessage(error, '替换失败'), taskId: '', startTime: null })
+    }
+  }, [
+    currentProject?.id,
+    formatDurationSeconds,
+    normalizeDurationSeconds,
+    registerTaskPolling,
+    replCharImage,
+    replPrompt,
+    replProvider,
+    replVideoResolution,
+    replWanCheckImage,
+    replWanMode,
+    updateReplaceBatchItem,
+  ])
+
+  const runReplaceBatch = useCallback(async () => {
+    const runnable = replaceBatchItems.filter(item => !['processing', 'completed'].includes(item.status))
+    if (!replCharImage) {
+      alert('请先上传替换角色图片')
+      return
+    }
+    if (!runnable.length) {
+      alert('没有可提交的批量场景')
+      return
+    }
+    for (let index = 0; index < runnable.length; index += 1) {
+      await runOneReplaceBatchItem(runnable[index])
+      if (index < runnable.length - 1) {
+        await new Promise(resolve => window.setTimeout(resolve, 800))
+      }
+    }
+  }, [replaceBatchItems, replCharImage, runOneReplaceBatchItem])
+
   const resumeReplaceTaskPolling = useCallback((replaceVideo) => {
     if (!replaceVideo?.replTaskId) return
     if (replaceVideo.replStatus !== 'processing') return
@@ -629,6 +763,17 @@ export default function GameVideoPage() {
 
   useEffect(() => {
     if (!currentProject) return
+    if (activeTab !== 'replace') return
+    replScenes.forEach((scene) => {
+      if (!scene.refVideoUrl || normalizeDurationSeconds(scene.refVideoDurationSeconds) != null) return
+      fetchMissingVideoDuration(scene.refVideoUrl, (durationSeconds) => {
+        updateScene(scene.id, { refVideoDurationSeconds: durationSeconds })
+      })
+    })
+  }, [activeTab, currentProject, fetchMissingVideoDuration, normalizeDurationSeconds, replScenes, updateScene])
+
+  useEffect(() => {
+    if (!currentProject) return
     if (activeTab === 'replace' && replRefVideo && normalizeDurationSeconds(replRefVideoDurationSeconds) == null) {
       fetchMissingVideoDuration(replRefVideo, setReplRefVideoDurationSeconds)
     }
@@ -659,6 +804,125 @@ export default function GameVideoPage() {
     setGenScenes(prev => prev.filter(s => s.id !== id).map((s, i) => ({ ...s, idx: i + 1 })))
     setReplScenes(prev => prev.filter(s => s.id !== id).map((s, i) => ({ ...s, idx: i + 1 })))
   }
+
+  const uploadReplaceReferenceVideoToScene = useCallback((sceneId) => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = 'video/*'
+    input.onchange = async (event) => {
+      const file = event.target.files?.[0]
+      if (!file) return
+      const uploaded = await uploadSingleFileWithFeedback(file, '参考视频上传失败')
+      if (!uploaded) return
+      const referenceLimits = getReplaceReferenceDurationLimits(replProvider)
+      const accepted = await validateReferenceVideoUpload(uploaded, {
+        label: '参考视频',
+        minSeconds: referenceLimits.minSeconds,
+        maxSeconds: referenceLimits.maxSeconds,
+        providerLabel: getReplaceProviderSpec(replProvider).providerLabel,
+      })
+      if (!accepted) return
+      updateScene(sceneId, {
+        refVideoUrl: accepted.url,
+        refVideoDurationSeconds: accepted.durationSeconds,
+      }, { saveImmediately: true })
+    }
+    input.click()
+  }, [
+    replProvider,
+    updateScene,
+    uploadSingleFileWithFeedback,
+  ])
+
+  const getReplaceSceneBlockReason = useCallback((scene) => (
+    getReplaceVideoBlockReason(replProvider, {
+      charImage: scene?.charImages?.[0] || null,
+      refVideo: scene?.refVideoUrl || '',
+      refVideoDurationSeconds: scene?.refVideoDurationSeconds,
+    }, {
+      formatDurationSeconds,
+      normalizeDurationSeconds,
+    })
+  ), [formatDurationSeconds, normalizeDurationSeconds, replProvider])
+
+  const replaceOneScene = useCallback(async (sceneId) => {
+    const scene = replScenesRef.current.find(item => item.id === sceneId)
+    if (!scene) return
+    const blockReason = getReplaceSceneBlockReason(scene)
+    if (blockReason) {
+      updateScene(sceneId, { status: 'failed', error: blockReason, taskId: '', startTime: null }, { saveImmediately: true })
+      return
+    }
+    const prevHistory = [...(scene.videoHistory || [])]
+    if (scene.videoUrl) {
+      prevHistory.push({ url: scene.videoUrl, prompt: scene.prompt, model: replProvider, ts: Date.now() })
+    }
+    updateScene(sceneId, {
+      status: 'processing',
+      videoUrl: '',
+      error: '',
+      taskId: '',
+      startTime: Date.now(),
+      videoHistory: prevHistory,
+    }, { saveImmediately: true })
+    try {
+      const result = await api.post('/api/game/replace_video', {
+        project_id: currentProject?.id || '',
+        ref_video_url: scene.refVideoUrl,
+        character_ref: scene.charImages[0].url,
+        prompt: scene.prompt || replPrompt,
+        provider: replProvider,
+        mode: replProvider === 'wan' ? replWanMode : '',
+        check_image: replProvider === 'wan' ? replWanCheckImage : false,
+        resolution: replProvider === 'jimeng' ? replVideoResolution : '720p',
+      })
+      if (result.task_record_warning) alert(result.task_record_warning)
+      if (result.task_id) {
+        updateScene(sceneId, { provider: replProvider, taskId: result.task_id, status: 'processing' }, { saveImmediately: true })
+        registerTaskPolling(result.task_id, (updates) => updateScene(
+          sceneId,
+          updates,
+          { saveImmediately: updates.status === 'completed' || updates.status === 'failed' },
+        ))
+      }
+    } catch (error) {
+      updateScene(sceneId, { status: 'failed', error: getErrorMessage(error, '替换失败'), startTime: null }, { saveImmediately: true })
+    }
+  }, [
+    currentProject?.id,
+    getReplaceSceneBlockReason,
+    registerTaskPolling,
+    replPrompt,
+    replProvider,
+    replScenesRef,
+    replVideoResolution,
+    replWanCheckImage,
+    replWanMode,
+    updateScene,
+  ])
+
+  const replaceAllScenes = useCallback(async () => {
+    const runnable = replScenesRef.current.filter(scene => (
+      scene.status !== 'processing'
+      && scene.status !== 'generating'
+      && scene.status !== 'completed'
+      && !getReplaceSceneBlockReason(scene)
+    ))
+    const skippedCount = replScenesRef.current.filter(scene => getReplaceSceneBlockReason(scene)).length
+    if (!runnable.length) {
+      alert(skippedCount ? '没有可换人的场景，请检查每个场景是否已上传角色图和参考视频。' : '没有可换人的场景')
+      return
+    }
+    if (skippedCount > 0) {
+      alert(`已跳过 ${skippedCount} 个场景：请检查角色图、参考视频或视频时长限制。`)
+    }
+    for (let index = 0; index < runnable.length; index += 1) {
+      await replaceOneScene(runnable[index].id)
+      if (index < runnable.length - 1) {
+        await new Promise(resolve => window.setTimeout(resolve, 800))
+      }
+    }
+  }, [getReplaceSceneBlockReason, replaceOneScene, replScenesRef])
 
   function cleanImageModelName(name) {
     return cleanImageModelLabel(name)
@@ -960,7 +1224,10 @@ export default function GameVideoPage() {
 
   const completedCount = scenes.filter(s => s.status === 'completed').length
   const processingCount = scenes.filter(s => s.status === 'processing' || s.status === 'generating').length
-  const recordScenes = scenes.filter(s => s.videoUrl || s.status !== 'idle' || (s.videoHistory || []).length > 0)
+  const replaceCompletedCount = replScenes.filter(s => s.status === 'completed').length
+  const replaceProcessingCount = replScenes.filter(s => s.status === 'processing' || s.status === 'generating').length
+  const recordSourceScenes = activeTab === 'replace' ? replScenes : scenes
+  const recordScenes = recordSourceScenes.filter(s => s.videoUrl || s.status !== 'idle' || (s.videoHistory || []).length > 0)
 
   const estimateCost = (scene) => {
     const m = models.find(m => m.id === scene.model)
@@ -1107,6 +1374,120 @@ export default function GameVideoPage() {
     />
   )
 
+  const renderReplaceSceneCard = (scene) => {
+    const blockReason = getReplaceSceneBlockReason(scene)
+    const displayError = formatProviderVideoCacheError(scene.error)
+    const canRetryResultCache = !!scene.taskId && isProviderVideoCacheError(scene.error)
+    const retryingResultCache = canRetryResultCache && retryingResultCacheTaskIds.has(scene.taskId)
+    const durationHint = getReplaceReferenceDurationHint(scene.refVideoDurationSeconds, replProvider, {
+      formatDurationSeconds,
+      label: `${replaceProviderSpec.providerLabel}参考视频`,
+      normalizeDurationSeconds,
+    })
+    const isBusy = scene.status === 'processing' || scene.status === 'generating'
+
+    return (
+      <div key={scene.id} style={{
+        background: 'var(--bg-secondary)',
+        borderRadius: 14,
+        border: '1px solid var(--border)',
+        borderLeft: `3px solid ${scene.status === 'completed' ? '#10b981' : scene.status === 'failed' ? '#ef4444' : isBusy ? 'var(--accent)' : 'var(--border)'}`,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderBottom: '1px solid var(--border)' }}>
+          <strong style={{ fontSize: 14, color: 'var(--accent)' }}>场景 {scene.idx}</strong>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {scene.prompt || scene.charImages?.[0]?.name || scene.refVideoUrl || '待配置换人素材'}
+          </span>
+          {isBusy && <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--accent)', fontWeight: 700 }}><Loader2 size={13} className="spin" />处理中 ({elapsed(scene.startTime)}s)</span>}
+          {scene.status === 'completed' && <span style={{ fontSize: 11, color: '#10b981', fontWeight: 700 }}>已完成</span>}
+          {scene.status === 'failed' && <span style={{ fontSize: 11, color: '#ef4444', fontWeight: 700 }}>失败</span>}
+          {replScenes.length > 1 && <button type="button" onClick={() => removeScene(scene.id)} style={{ background: 'none', color: 'var(--text-muted)', padding: 4 }}><Trash2 size={13} /></button>}
+        </div>
+
+        <div style={{ padding: 14 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr 240px', gap: 14, alignItems: 'start' }}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 6 }}>
+                <User size={12} color="var(--text-muted)" />
+                <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)' }}>替换角色图</span>
+                <button type="button" onClick={() => uploadImageToScene(scene.id, 'character')} style={{ marginLeft: 'auto', background: 'none', color: 'var(--accent)', padding: 2 }}><Plus size={13} /></button>
+              </div>
+              {scene.charImages?.[0] ? (
+                <div role="button" tabIndex={0} onClick={() => openImageLightbox(scene.charImages[0].url)} style={{ position: 'relative', width: 120, cursor: 'pointer' }}>
+                  <img src={mediaUrl(scene.charImages[0].url)} alt="" loading="lazy" decoding="async" style={{ width: 120, height: 120, objectFit: 'cover', borderRadius: 10, border: '2px solid var(--accent)' }} />
+                  <button type="button" onClick={(event) => { event.stopPropagation(); removeImageFromScene(scene.id, 'character', 0) }} style={{ position: 'absolute', top: 4, right: 4, background: 'rgba(0,0,0,0.7)', color: '#fff', borderRadius: 6, padding: 3, lineHeight: 0 }}><X size={12} /></button>
+                </div>
+              ) : (
+                <button type="button" onClick={() => uploadImageToScene(scene.id, 'character')} style={{ width: 120, height: 120, borderRadius: 10, background: 'var(--bg-primary)', border: '2px dashed rgba(139,92,246,0.3)', color: 'var(--accent)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                  <User size={24} style={{ opacity: 0.5 }} />
+                  <span style={{ fontSize: 11 }}>上传角色</span>
+                </button>
+              )}
+            </div>
+
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 6 }}>
+                <Video size={12} color={scene.refVideoUrl ? '#10b981' : 'var(--text-muted)'} />
+                <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)' }}>参考视频</span>
+                <button type="button" onClick={() => uploadReplaceReferenceVideoToScene(scene.id)} style={{ marginLeft: 'auto', background: 'none', color: 'var(--accent)', padding: 2 }}><Upload size={13} /></button>
+              </div>
+              {scene.refVideoUrl ? (
+                <>
+                  <div style={{ position: 'relative' }}>
+                    <video src={mediaUrl(scene.refVideoUrl)} controls preload="none" style={{ width: '100%', maxHeight: 180, borderRadius: 10, background: '#000', display: 'block' }} />
+                    <button type="button" onClick={() => updateScene(scene.id, { refVideoUrl: '', refVideoDurationSeconds: null }, { saveImmediately: true })} style={{ position: 'absolute', top: 6, right: 6, background: 'rgba(0,0,0,0.7)', color: '#fff', borderRadius: 6, padding: 3, lineHeight: 0 }}><X size={14} /></button>
+                  </div>
+                  {durationHint && <div style={{ marginTop: 6, fontSize: 11, color: blockReason ? '#ef4444' : '#10b981', lineHeight: 1.6 }}>{durationHint}</div>}
+                </>
+              ) : (
+                <button type="button" onClick={() => uploadReplaceReferenceVideoToScene(scene.id)} style={{ width: '100%', minHeight: 120, borderRadius: 10, background: 'var(--bg-primary)', border: '2px dashed var(--border)', color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                  <Upload size={24} style={{ opacity: 0.4 }} />
+                  <span style={{ fontSize: 12 }}>上传要替换的原视频</span>
+                </button>
+              )}
+
+              <textarea
+                value={scene.prompt || ''}
+                onChange={event => updateScene(scene.id, { prompt: event.target.value })}
+                placeholder="可选：补充换人要求，例如保持原视频动作、镜头和背景不变"
+                style={{ width: '100%', marginTop: 10, minHeight: 56, padding: 8, borderRadius: 8, background: 'var(--bg-primary)', border: '1px solid var(--border)', color: 'var(--text-primary)', fontSize: 12, lineHeight: 1.5, resize: 'vertical' }}
+              />
+              {displayError && (
+                <div style={{ marginTop: 6, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 11, color: '#ef4444' }}>
+                  <span>{displayError}</span>
+                  {canRetryResultCache && (
+                    <button type="button" onClick={() => retrySceneResultCache(scene.id)} disabled={retryingResultCache} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 8px', borderRadius: 5, fontSize: 10, fontWeight: 700, background: 'rgba(59,130,246,0.1)', color: '#2563eb', border: '1px solid rgba(59,130,246,0.2)' }}>
+                      {retryingResultCache ? <Loader2 size={10} className="spin" /> : <RefreshCw size={10} />} 重新拉取结果
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div>
+              {scene.videoUrl ? (
+                <>
+                  <video src={mediaUrl(scene.videoUrl)} controls preload="none" style={{ width: '100%', borderRadius: 10, background: '#000', display: 'block' }} />
+                  <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                    <a href={mediaUrl(scene.videoUrl)} download={`场景${scene.idx}.mp4`} style={{ flex: 1, padding: '7px 0', borderRadius: 7, fontSize: 11, fontWeight: 700, background: 'rgba(16,185,129,0.1)', color: '#10b981', border: '1px solid rgba(16,185,129,0.2)', textAlign: 'center', textDecoration: 'none' }}><Download size={11} /> 下载</a>
+                    <button type="button" onClick={() => replaceOneScene(scene.id)} disabled={!!blockReason || isBusy} title={blockReason || ''} style={{ flex: 1, padding: '7px 0', borderRadius: 7, fontSize: 11, fontWeight: 700, background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', border: '1px solid var(--border)', opacity: blockReason ? 0.45 : 1 }}><RefreshCw size={11} /> 重新换人</button>
+                  </div>
+                </>
+              ) : (
+                <div style={{ minHeight: 150, borderRadius: 10, background: 'var(--bg-tertiary)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 14 }}>
+                  <button type="button" onClick={() => replaceOneScene(scene.id)} disabled={!!blockReason || isBusy} title={blockReason || ''} style={{ width: '88%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px 0', borderRadius: 10, fontSize: 12, fontWeight: 800, background: !blockReason && !isBusy ? 'var(--accent-gradient)' : 'rgba(124,58,237,0.14)', color: !blockReason && !isBusy ? '#fff' : 'rgba(124,58,237,0.9)', border: !blockReason && !isBusy ? 'none' : '1px solid rgba(124,58,237,0.22)', cursor: !blockReason && !isBusy ? 'pointer' : 'not-allowed' }}>
+                    {isBusy ? <Loader2 size={14} className="spin" /> : <Video size={14} />}
+                    {isBusy ? `换人中 ${elapsed(scene.startTime)}s` : '开始换人'}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   // ── Workspace ──
   const selectedStandaloneImageModel = imageModels.find(m => m.id === imgGenModel)
   const standaloneImageQualityIds = getImageQualityIds(selectedStandaloneImageModel)
@@ -1135,52 +1516,36 @@ export default function GameVideoPage() {
               onOpenSettings={() => setShowSettings(true)}
             />
           )}
-          {(activeTab === 'image' || activeTab === 'reverse' || activeTab === 'replace') && (
+          {activeTab === 'replace' && (
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={addScene} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 12px', borderRadius: 7, fontSize: 11, fontWeight: 600, background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}><Plus size={13} /> 添加场景</button>
+              <button onClick={replaceAllScenes} disabled={replaceProcessingCount > 0} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 14px', borderRadius: 7, fontSize: 11, fontWeight: 700, background: replaceProcessingCount > 0 ? 'var(--bg-tertiary)' : 'var(--accent-gradient)', color: '#fff' }}>
+                {replaceProcessingCount > 0 ? <><Loader2 size={13} className="spin" /> 换人中 ({replaceProcessingCount})</> : <><Video size={13} /> 全部换人</>}
+              </button>
+              {replaceCompletedCount > 0 && (
+                <button onClick={downloadAll} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 12px', borderRadius: 7, fontSize: 11, fontWeight: 600, background: 'rgba(16,185,129,0.1)', color: '#10b981', border: '1px solid rgba(16,185,129,0.2)' }}><Download size={13} /> 全部导出 ({replaceCompletedCount})</button>
+              )}
+              <select value={replProvider} onChange={event => handleReplaceProviderChange(event.target.value)} style={{ padding: '6px 10px', borderRadius: 7, fontSize: 11, background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}>
+                {VIDEO_REPLACE_PROVIDER_SPECS.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
+              </select>
+              <button onClick={() => setShowSettings(true)} title="API 设置" style={{ background: 'none', color: 'var(--text-muted)', padding: '6px 8px' }}><Settings size={16} /></button>
+            </div>
+          )}
+          {(activeTab === 'image' || activeTab === 'reverse') && (
             <button onClick={() => setShowSettings(true)} title="API 设置" style={{ background: 'none', color: 'var(--text-muted)', padding: '6px 8px' }}><Settings size={16} /></button>
           )}
         </div>
 
         {/* Content Area */}
         <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
-	          {shouldKeepReplaceTabMounted && (
-	            <ReplaceVideoPanel
-	              active={activeTab === 'replace'}
-	              providerSpecs={VIDEO_REPLACE_PROVIDER_SPECS}
-	              provider={replProvider}
-	              providerSpec={replaceProviderSpec}
-	              blockReason={replaceBlockReason}
-	              durationHint={replacementDurationHint}
-	              charImage={replCharImage}
-	              refVideo={replRefVideo}
-	              prompt={replPrompt}
-	              videoResolution={replVideoResolution}
-	              wanMode={replWanMode}
-	              wanCheckImage={replWanCheckImage}
-	              status={replStatus}
-	              error={replError}
-	              videoUrl={replVideoUrl}
-	              taskId={replTaskId}
-	              retryingResultCache={!!replTaskId && retryingResultCacheTaskIds.has(replTaskId)}
-	              startTime={replStartTime}
-	              history={replHistory}
-	              elapsed={elapsed}
-	              onProviderChange={handleReplaceProviderChange}
-	              onOpenImage={openImageLightbox}
-	              onClearCharacterImage={handleClearReplaceCharacterImage}
-	              onCharacterFileSelected={handleReplaceCharacterFileSelected}
-	              onClearReferenceVideo={handleClearReplaceReferenceVideo}
-	              onReferenceVideoFileSelected={handleReplaceReferenceVideoFileSelected}
-	              onPromptChange={setReplPrompt}
-	              onResolutionChange={handleReplaceResolutionChange}
-	              onWanModeChange={setReplWanMode}
-	              onWanCheckImageChange={setReplWanCheckImage}
-	              onRun={handleReplaceVideo}
-	              onRetryResultCache={retryReplaceResultCache}
-	              onResetResult={handleResetReplaceResult}
-	              onSelectHistory={handleSelectReplaceHistory}
-	              onRemoveHistoryItem={handleRemoveReplaceHistoryItem}
-	            />
-	          )}
+          {activeTab === 'replace' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {replScenes.map(scene => renderReplaceSceneCard(scene))}
+              <button onClick={addScene} style={{ padding: 14, borderRadius: 14, background: 'none', border: '2px dashed var(--border)', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                <Plus size={16} /> 添加换人场景
+              </button>
+            </div>
+          )}
           <ImageGenerationPanel
             active={activeTab === 'image'}
             imageModels={imageModels}

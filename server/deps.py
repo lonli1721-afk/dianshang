@@ -38,6 +38,7 @@ DATA_DIR = Path(os.environ.get("USER_DATA_DIR", Path.home() / ".game-video-tool"
 FILES_DIR: Path = DATA_DIR / "files"
 FILES_DIR.mkdir(parents=True, exist_ok=True)
 _current_files_dir: ContextVar[Path] = ContextVar("current_files_dir", default=FILES_DIR)
+_current_user: ContextVar[dict] = ContextVar("current_user", default={})
 _known_files_dirs: set[Path] = {FILES_DIR}
 _files_dir_lock = threading.RLock()
 
@@ -56,6 +57,104 @@ _video_tasks: dict[str, dict] = {}
 
 # 云端同步
 cloud_sync = None
+
+API_USAGE_GROUPS = [
+    {"id": "fa1", "label": "发一", "department": "发行事业一部", "description": "发行事业一部（不含混变项目组）"},
+    {"id": "fa1_hunbian", "label": "发一混变组", "department": "发行事业一部", "team": "混变项目组"},
+    {"id": "fa2", "label": "发二", "department": "发行事业二部"},
+    {"id": "fa3", "label": "发三", "department": "发行事业三部"},
+    {"id": "market", "label": "市场发展部", "department": "市场发展部"},
+]
+_API_USAGE_GROUP_IDS = {item["id"] for item in API_USAGE_GROUPS}
+
+
+def set_current_user(user: dict | None) -> None:
+    _current_user.set(dict(user or {}))
+
+
+def get_current_user() -> dict:
+    return dict(_current_user.get() or {})
+
+
+def get_api_usage_groups() -> list[dict]:
+    return [dict(item) for item in API_USAGE_GROUPS]
+
+
+def normalize_api_usage_group(value: str) -> str:
+    group_id = (value or "").strip()
+    return group_id if group_id in _API_USAGE_GROUP_IDS else ""
+
+
+def _split_department_and_team(team: str) -> tuple[str, str]:
+    value = (team or "").strip()
+    departments = ("发行事业一部", "发行事业二部", "发行事业三部", "市场发展部")
+    for department in departments:
+        if value == department:
+            return department, ""
+        prefix = f"{department}-"
+        if value.startswith(prefix):
+            return department, value[len(prefix):].strip("-")
+    return "", value
+
+
+def _group_from_department_team(department: str, team: str) -> str:
+    department = (department or "").strip()
+    team = (team or "").strip()
+    if department == "发行事业一部" and "混变" in team:
+        return "fa1_hunbian"
+    if department == "发行事业一部":
+        return "fa1"
+    if department == "发行事业二部":
+        return "fa2"
+    if department == "发行事业三部":
+        return "fa3"
+    if department == "市场发展部":
+        return "market"
+    return ""
+
+
+def current_api_usage_group() -> str:
+    manual = normalize_api_usage_group(db.get_user_setting("game_api_usage_group", ""))
+    if manual:
+        return manual
+    user = get_current_user()
+    user_id = user.get("sub") or user.get("id") or ""
+    full = {}
+    if user_id:
+        try:
+            full = auth.get_user_full(user_id) or {}
+        except Exception:
+            logger.debug("Failed to resolve current user for API group", exc_info=True)
+    team = (full.get("team") or user.get("team") or "").strip()
+    department, team_group = _split_department_and_team(team)
+    return _group_from_department_team(department, team_group)
+
+
+def group_api_setting_keys(name: str) -> list[str]:
+    if (name or "").strip() not in {"ark_api_key", "jimeng_api_key", "game_ark_api_key", "game_jimeng_api_key"}:
+        return []
+    group_id = current_api_usage_group()
+    if not group_id:
+        return []
+    clean = (name or "").strip()
+    if not clean:
+        return []
+    keys = [f"group_api_{group_id}_{clean}"]
+    if not clean.startswith("game_"):
+        keys.insert(0, f"group_api_{group_id}_game_{clean}")
+    return keys
+
+
+def get_group_api_key(name: str) -> str:
+    for key in group_api_setting_keys(name):
+        value = (settings_manager.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def get_group_api_key_pool(name: str) -> list[str]:
+    return []
 
 # Shared HTTP client (connection pooling, avoids repeated SSL context creation)
 http_client: Optional[httpx.AsyncClient] = None

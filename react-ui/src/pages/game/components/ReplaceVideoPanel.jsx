@@ -14,6 +14,19 @@ function selectSingleFile(accept, onSelect) {
   input.click()
 }
 
+function selectMultipleFiles(accept, onSelect) {
+  if (typeof document === 'undefined') return
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = accept
+  input.multiple = true
+  input.onchange = (event) => {
+    const files = Array.from(event.target.files || [])
+    if (files.length) void onSelect(files)
+  }
+  input.click()
+}
+
 export default function ReplaceVideoPanel({
   active,
   providerSpecs,
@@ -34,6 +47,7 @@ export default function ReplaceVideoPanel({
   retryingResultCache,
   startTime,
   history,
+  batchItems = [],
   elapsed,
   onProviderChange,
   onOpenImage,
@@ -41,6 +55,10 @@ export default function ReplaceVideoPanel({
   onCharacterFileSelected,
   onClearReferenceVideo,
   onReferenceVideoFileSelected,
+  onBatchReferenceVideoFilesSelected,
+  onRemoveBatchItem,
+  onClearBatchItems,
+  onRunBatch,
   onPromptChange,
   onResolutionChange,
   onWanModeChange,
@@ -60,6 +78,9 @@ export default function ReplaceVideoPanel({
   const buttonShadow = canRunReplace ? '0 6px 18px rgba(59,130,246,0.22)' : 'none'
   const canRetryResultCache = !!taskId && isProviderVideoCacheError(error) && typeof onRetryResultCache === 'function'
   const displayError = formatProviderVideoCacheError(error)
+  const batchProcessingCount = batchItems.filter(item => item.status === 'processing').length
+  const batchDoneCount = batchItems.filter(item => item.status === 'completed').length
+  const canRunBatch = batchItems.length > 0 && batchProcessingCount === 0 && status !== 'processing' && !blockReason
 
   return (
     <div>
@@ -145,6 +166,95 @@ export default function ReplaceVideoPanel({
                 </button>
               )}
             </div>
+          </div>
+
+          <div style={{
+            marginBottom: 16,
+            padding: 12,
+            borderRadius: 12,
+            border: '1px solid rgba(139,92,246,0.18)',
+            background: 'rgba(139,92,246,0.05)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              <Video size={14} color="var(--accent)" />
+              <strong style={{ fontSize: 13 }}>批量换人场景</strong>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>同一张角色图，可一次上传多个参考视频排队替换</span>
+              <button
+                type="button"
+                onClick={() => selectMultipleFiles('video/*', onBatchReferenceVideoFilesSelected)}
+                style={{ marginLeft: 'auto', padding: '5px 10px', borderRadius: 7, fontSize: 11, fontWeight: 700, background: 'var(--bg-primary)', color: 'var(--accent)', border: '1px solid rgba(139,92,246,0.24)' }}
+              >
+                + 添加多个场景
+              </button>
+              {batchItems.length > 0 && (
+                <button
+                  type="button"
+                  onClick={onClearBatchItems}
+                  style={{ padding: '5px 10px', borderRadius: 7, fontSize: 11, background: 'var(--bg-primary)', color: 'var(--text-muted)', border: '1px solid var(--border)' }}
+                >
+                  清空
+                </button>
+              )}
+            </div>
+            {batchItems.length === 0 ? (
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                适合“同一个角色替换多个视频场景”的情况。先上传上方角色图，再点“添加多个场景”选择多个视频。
+              </div>
+            ) : (
+              <>
+                <div style={{ display: 'grid', gap: 8, marginBottom: 10 }}>
+                  {batchItems.map((item, index) => (
+                    <div key={item.id} style={{ display: 'grid', gridTemplateColumns: '52px 1fr 110px 28px', gap: 8, alignItems: 'center', padding: 8, borderRadius: 10, background: 'var(--bg-primary)', border: '1px solid var(--border)' }}>
+                      <video src={mediaUrl(item.videoUrl || item.refVideo)} preload="none" muted playsInline style={{ width: 52, height: 52, borderRadius: 8, objectFit: 'cover', background: '#000' }} />
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          场景 {index + 1} · {item.name || '参考视频'}
+                        </div>
+                        <div style={{ fontSize: 10, color: item.status === 'failed' ? '#ef4444' : 'var(--text-muted)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {item.status === 'processing'
+                            ? `处理中 ${elapsed(item.startTime)}s`
+                            : item.status === 'completed'
+                              ? '已完成，可下载'
+                              : item.status === 'failed'
+                                ? (item.error || '失败')
+                                : '待提交'}
+                        </div>
+                      </div>
+                      {item.videoUrl ? (
+                        <a href={mediaUrl(item.videoUrl)} download={`批量换人-场景${index + 1}.mp4`} target="_blank" rel="noreferrer" style={{ textAlign: 'center', padding: '6px 0', borderRadius: 7, fontSize: 11, fontWeight: 700, background: 'rgba(16,185,129,0.1)', color: '#10b981', border: '1px solid rgba(16,185,129,0.2)', textDecoration: 'none' }}>
+                          下载结果
+                        </a>
+                      ) : (
+                        <span style={{ textAlign: 'center', fontSize: 11, color: 'var(--text-muted)' }}>
+                          {item.status === 'processing' ? '生成中' : item.status === 'failed' ? '失败' : '未生成'}
+                        </span>
+                      )}
+                      <button type="button" onClick={() => onRemoveBatchItem(item.id)} style={{ width: 28, height: 28, borderRadius: 7, background: 'var(--bg-tertiary)', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <X size={13} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={onRunBatch}
+                  disabled={!canRunBatch}
+                  style={{
+                    width: '100%',
+                    padding: '9px 0',
+                    borderRadius: 9,
+                    fontSize: 12,
+                    fontWeight: 800,
+                    background: canRunBatch ? 'var(--accent-gradient)' : 'rgba(124,58,237,0.14)',
+                    color: canRunBatch ? '#fff' : 'rgba(124,58,237,0.9)',
+                    border: canRunBatch ? 'none' : '1px solid rgba(124,58,237,0.22)',
+                    cursor: canRunBatch ? 'pointer' : 'not-allowed',
+                  }}
+                >
+                  {batchProcessingCount > 0 ? `批量处理中 ${batchDoneCount}/${batchItems.length}` : `批量开始换人（${batchItems.length} 个场景）`}
+                </button>
+              </>
+            )}
           </div>
 
           {providerSpec.supports_prompt && (
