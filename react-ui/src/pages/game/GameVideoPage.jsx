@@ -216,22 +216,6 @@ export default function GameVideoPage() {
     setRetryingResultCacheTaskIds(next)
   }, [])
 
-  useEffect(() => {
-    const hasWanKey = Boolean(gameSettings.game_dashscope_api_key)
-    const hasSeedanceKey = Boolean(gameSettings.game_ark_api_key)
-    let nextProvider = ''
-    if (replProvider === 'wan' && !hasWanKey) {
-      nextProvider = 'jimeng'
-    } else if (replProvider === 'jimeng' && hasWanKey && !hasSeedanceKey) {
-      nextProvider = 'wan'
-    }
-    if (!nextProvider || nextProvider === replProvider) return
-    const timer = window.setTimeout(() => {
-      setReplProvider(nextProvider)
-    }, 0)
-    return () => window.clearTimeout(timer)
-  }, [gameSettings.game_ark_api_key, gameSettings.game_dashscope_api_key, replProvider, setReplProvider])
-
   const imageLightboxOverlay = (
     <ImageLightbox
       imageUrl={imageLightboxUrl}
@@ -794,11 +778,11 @@ export default function GameVideoPage() {
   ])
 
   const addScene = () => {
-    setGenScenes(prev => {
-      const nextScene = makeScene(prev.length + 1, modelsRef.current)
-      setReplScenes(replPrev => [...replPrev, cloneScene(nextScene)])
-      return [...prev, nextScene]
-    })
+    if (activeTab === 'replace') {
+      setReplScenes(prev => [...prev, makeScene(prev.length + 1, modelsRef.current)])
+      return
+    }
+    setGenScenes(prev => [...prev, makeScene(prev.length + 1, modelsRef.current)])
   }
   const removeScene = (id) => {
     setGenScenes(prev => prev.filter(s => s.id !== id).map((s, i) => ({ ...s, idx: i + 1 })))
@@ -916,12 +900,7 @@ export default function GameVideoPage() {
     if (skippedCount > 0) {
       alert(`已跳过 ${skippedCount} 个场景：请检查角色图、参考视频或视频时长限制。`)
     }
-    for (let index = 0; index < runnable.length; index += 1) {
-      await replaceOneScene(runnable[index].id)
-      if (index < runnable.length - 1) {
-        await new Promise(resolve => window.setTimeout(resolve, 800))
-      }
-    }
+    await Promise.all(runnable.map(scene => replaceOneScene(scene.id)))
   }, [getReplaceSceneBlockReason, replaceOneScene, replScenesRef])
 
   function cleanImageModelName(name) {
@@ -1538,8 +1517,72 @@ export default function GameVideoPage() {
 
         {/* Content Area */}
         <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
+          <ReplaceVideoPanel
+            active={false}
+            providerSpecs={VIDEO_REPLACE_PROVIDER_SPECS}
+            provider={replProvider}
+            providerSpec={replaceProviderSpec}
+            blockReason={replaceBlockReason}
+            durationHint={replacementDurationHint}
+            charImage={replCharImage}
+            refVideo={replRefVideo}
+            prompt={replPrompt}
+            videoResolution={replVideoResolution}
+            wanMode={replWanMode}
+            wanCheckImage={replWanCheckImage}
+            status={replStatus}
+            error={replError}
+            videoUrl={replVideoUrl}
+            taskId={replTaskId}
+            retryingResultCache={!!replTaskId && retryingResultCacheTaskIds.has(replTaskId)}
+            startTime={replStartTime}
+            history={replHistory}
+            batchItems={replaceBatchItems}
+            elapsed={elapsed}
+            onProviderChange={handleReplaceProviderChange}
+            onOpenImage={openImageLightbox}
+            onClearCharacterImage={handleClearReplaceCharacterImage}
+            onCharacterFileSelected={handleReplaceCharacterFileSelected}
+            onClearReferenceVideo={handleClearReplaceReferenceVideo}
+            onReferenceVideoFileSelected={handleReplaceReferenceVideoFileSelected}
+            onBatchReferenceVideoFilesSelected={addReplaceBatchReferenceVideos}
+            onRemoveBatchItem={removeReplaceBatchItem}
+            onClearBatchItems={clearReplaceBatchItems}
+            onRunBatch={runReplaceBatch}
+            onPromptChange={setReplPrompt}
+            onResolutionChange={handleReplaceResolutionChange}
+            onWanModeChange={setReplWanMode}
+            onWanCheckImageChange={setReplWanCheckImage}
+            onRun={handleReplaceVideo}
+            onRetryResultCache={() => retrySceneResultCache(replTaskId)}
+            onResetResult={handleResetReplaceResult}
+            onSelectHistory={handleSelectReplaceHistory}
+            onRemoveHistoryItem={handleRemoveReplaceHistoryItem}
+          />
           {activeTab === 'replace' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div style={{ maxWidth: 980, width: '100%', margin: '0 auto', background: 'var(--bg-secondary)', borderRadius: 14, border: '1px solid var(--border)', padding: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+                  <RefreshCw size={18} color="var(--accent)" />
+                  <span style={{ fontSize: 15, fontWeight: 700 }}>视频换人</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>每个场景可单独上传角色图和参考视频，支持多场景一起提交</span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 }}>
+                  {VIDEO_REPLACE_PROVIDER_SPECS.map(item => (
+                    <button key={item.id} onClick={() => handleReplaceProviderChange(item.id)} style={{
+                      padding: '12px 14px',
+                      borderRadius: 10,
+                      textAlign: 'left',
+                      background: replProvider === item.id ? 'rgba(139,92,246,0.1)' : 'var(--bg-primary)',
+                      border: replProvider === item.id ? '1.5px solid var(--accent)' : '1px solid var(--border)',
+                      cursor: 'pointer',
+                    }}>
+                      <div style={{ fontSize: 13, fontWeight: 800, color: replProvider === item.id ? 'var(--accent)' : 'var(--text-primary)' }}>{item.label}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>{item.desc}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
               {replScenes.map(scene => renderReplaceSceneCard(scene))}
               <button onClick={addScene} style={{ padding: 14, borderRadius: 14, background: 'none', border: '2px dashed var(--border)', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
                 <Plus size={16} /> 添加换人场景

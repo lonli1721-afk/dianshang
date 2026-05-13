@@ -197,7 +197,13 @@ async def _resolve_seedance_video_reference(svc, url: str) -> str:
     if not local_path:
         return url
 
-    return deps.build_signed_public_file_url(url)
+    public_url = deps.build_signed_public_file_url(url)
+    if public_url == url:
+        raise HTTPException(
+            400,
+            "Seedance 动作模仿需要模型方可访问的公网视频地址。本地测试服务器的上传文件不能被火山服务器读取，请上线测试，或为本地服务配置 PUBLIC_BASE_URL 后再试。",
+        )
+    return public_url
 
 
 async def _validate_seedance_reference_video_duration(url: str, label: str = "参考视频") -> float | None:

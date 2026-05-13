@@ -96,6 +96,7 @@ if (-not (Test-Path (Join-Path $WebDir "node_modules"))) {
 
 $backendCommand = @"
 `$env:USER_DATA_DIR='$DataDir'
+`$env:PUBLIC_BASE_URL='http://106.53.49.23/local-test'
 cd '$ServerDir'
 & '$Python' main.py --host 127.0.0.1 --port $ApiPort
 "@
