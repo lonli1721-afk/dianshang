@@ -8,23 +8,89 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ServerDir = Join-Path $Root "server"
 $WebDir = Join-Path $Root "react-ui"
 $DataDir = Join-Path $Root ".local-data"
+$VenvDir = Join-Path $ServerDir ".venv"
+$VenvPython = Join-Path $VenvDir "Scripts\python.exe"
+
+function Test-PythonCommand {
+  param([string]$CommandName)
+
+  try {
+    if ($CommandName -eq "py") {
+      & py -3 --version *> $null
+    } else {
+      & $CommandName --version *> $null
+    }
+    return ($LASTEXITCODE -eq 0)
+  } catch {
+    return $false
+  }
+}
+
+function Find-RealPython {
+  foreach ($Candidate in @("py", "python", "python3")) {
+    $Command = Get-Command $Candidate -ErrorAction SilentlyContinue
+    if (-not $Command) { continue }
+
+    $Source = [string]$Command.Source
+    if ($Source -like "*\Microsoft\WindowsApps\python*.exe") { continue }
+
+    if (Test-PythonCommand $Candidate) {
+      return $Candidate
+    }
+  }
+
+  $LocalPythonRoot = Join-Path $env:LocalAppData "Programs\Python"
+  if (Test-Path $LocalPythonRoot) {
+    $PythonExe = Get-ChildItem $LocalPythonRoot -Recurse -Filter python.exe -ErrorAction SilentlyContinue |
+      Where-Object { $_.FullName -notlike "*\Lib\venv\*" } |
+      Sort-Object FullName -Descending |
+      Select-Object -First 1
+
+    if ($PythonExe) {
+      return $PythonExe.FullName
+    }
+  }
+
+  return $null
+}
 
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 
-if (-not (Test-Path (Join-Path $ServerDir ".venv\Scripts\python.exe"))) {
-  Write-Host "Creating Python virtual environment..."
-  py -3 -m venv (Join-Path $ServerDir ".venv")
+if ((Test-Path $VenvDir) -and -not (Test-Path $VenvPython)) {
+  Write-Host "Removing incomplete Python virtual environment..."
+  Remove-Item -Recurse -Force $VenvDir
 }
 
-$Python = Join-Path $ServerDir ".venv\Scripts\python.exe"
+if (-not (Test-Path $VenvPython)) {
+  Write-Host "Creating Python virtual environment..."
+  $PythonLauncher = Find-RealPython
+  if (-not $PythonLauncher) {
+    throw "Python 3 was not found. Please install Python 3.12 and run this script again."
+  }
+
+  if ($PythonLauncher -eq "py") {
+    & py -3 -m venv $VenvDir
+  } else {
+    & $PythonLauncher -m venv $VenvDir
+  }
+
+  if (-not (Test-Path $VenvPython)) {
+    throw "Failed to create Python virtual environment."
+  }
+}
+
+$Python = $VenvPython
 Write-Host "Installing backend dependencies..."
 & $Python -m pip install -r (Join-Path $ServerDir "requirements.txt")
 
 if (-not (Test-Path (Join-Path $WebDir "node_modules"))) {
   Write-Host "Installing frontend dependencies..."
   Push-Location $WebDir
-  npm install
-  Pop-Location
+  try {
+    npm install
+  } finally {
+    Pop-Location
+  }
 }
 
 $backendCommand = @"
