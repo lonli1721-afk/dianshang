@@ -1,15 +1,20 @@
 import { useLocation, useNavigate } from 'react-router-dom'
-import { Settings, PanelLeftClose, PanelLeft, Gamepad2, Flame } from 'lucide-react'
+import { Settings, PanelLeftClose, PanelLeft, Gamepad2, Flame, Image as ImageIcon } from 'lucide-react'
+
+const IMAGE_TOOLBOX_TESTER_USERNAMES = new Set(['zhouyanqing', 'caipeiling', 'huanglin', 'huangye'])
 
 const NAV_ITEMS = [
   { path: '/', label: '视频工作台', icon: Gamepad2 },
   { path: '/viral-workbench', label: '爆款工作台', icon: Flame },
+  { path: '/image-toolbox', label: '图片工作台', icon: ImageIcon, adminOnly: true },
   { path: '/settings', label: '设置', icon: Settings },
 ]
 
-export default function Sidebar({ collapsed, onToggle, onPrefetchSettings }) {
+export default function Sidebar({ collapsed, onToggle, onPrefetchSettings, user }) {
   const location = useLocation()
   const navigate = useNavigate()
+  const canUseImageToolbox = user?.role === 'admin' || IMAGE_TOOLBOX_TESTER_USERNAMES.has(user?.username || '')
+  const navItems = NAV_ITEMS.filter((item) => !item.adminOnly || canUseImageToolbox)
 
   return (
     <aside style={{
@@ -23,7 +28,6 @@ export default function Sidebar({ collapsed, onToggle, onPrefetchSettings }) {
       overflow: 'hidden',
       position: 'relative',
     }}>
-      {/* Brand + Toggle */}
       <div style={{
         padding: collapsed ? '16px 12px' : '16px 18px',
         display: 'flex', alignItems: 'center',
@@ -56,9 +60,8 @@ export default function Sidebar({ collapsed, onToggle, onPrefetchSettings }) {
         </button>
       </div>
 
-      {/* Navigation */}
       <nav style={{ flex: 1, padding: '10px 8px', overflowY: 'auto' }}>
-        {NAV_ITEMS.map((item) => {
+        {navItems.map((item) => {
           const Icon = item.icon
           const isActive = location.pathname === item.path
           return (

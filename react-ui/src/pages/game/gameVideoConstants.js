@@ -1,13 +1,13 @@
 export const AI_MODELS = [
+  { id: 'doubao-seed-2-0-pro-260215', name: '火山 Doubao Seed 2.0 Pro' },
   { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro' },
-  { id: 'gpt-5.4', name: 'GPT-5.4' },
   { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
   { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
 ]
 
 export const REVERSE_MODELS = [
+  { id: 'doubao-seed-2-0-pro-260215', name: '火山 Doubao Seed 2.0 Pro (推荐)' },
   { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro (推荐)' },
-  { id: 'gpt-5.4', name: 'GPT-5.4' },
   { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
 ]
 
@@ -88,12 +88,13 @@ export const FALLBACK_VIDEO_MODELS = [
     name: 'Seedance 1.5 Pro',
     provider: 'jimeng',
     supports_ref_video: false,
-    supports_ref_images: false,
+    supports_ref_images: true,
     min_duration: 4,
-    max_duration: 10,
+    max_duration: 12,
+    max_ref_images: 2,
     supported_resolutions: ['720p'],
     default_resolution: '720p',
-    limit_note: '生成时长 4-10 秒；不支持参考视频；当前仅开放 720P',
+    limit_note: '生成时长 4-12 秒；支持 1 张首帧图或 2 张首尾帧图；不支持参考视频/普通多参考图；当前仅开放 720P',
     supported_modes: ['generate'],
     price_per_second: 0.3,
     price_unit: 'CNY',

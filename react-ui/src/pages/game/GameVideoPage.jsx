@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+﻿import { useState, useEffect, useRef, useCallback } from 'react'
 import { api } from '../../services/api'
 import {
   cloneScene,
@@ -363,6 +363,33 @@ export default function GameVideoPage() {
     setReplaceBatchItems(prev => prev.map(item => (item.id === id ? { ...item, ...updates } : item)))
   }, [])
 
+  const getReplaceBatchItem = useCallback((id) => (
+    replaceBatchItems.find(item => item.id === id)
+  ), [replaceBatchItems])
+
+  const createReplaceBatchItem = useCallback((overrides = {}) => ({
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name: '',
+    provider: replProvider,
+    charImage: null,
+    refVideo: '',
+    durationSeconds: null,
+    prompt: '',
+    videoResolution: replVideoResolution || '720p',
+    wanMode: replWanMode || 'wan-std',
+    wanCheckImage: replWanCheckImage,
+    status: 'idle',
+    taskId: '',
+    error: '',
+    videoUrl: '',
+    startTime: null,
+    ...overrides,
+  }), [replProvider, replVideoResolution, replWanCheckImage, replWanMode])
+
+  const addReplaceBatchItem = useCallback(() => {
+    setReplaceBatchItems(prev => [...prev, createReplaceBatchItem()])
+  }, [createReplaceBatchItem])
+
   const addReplaceBatchReferenceVideos = useCallback(async (files) => {
     const list = Array.from(files || [])
     if (!list.length) return
@@ -378,23 +405,66 @@ export default function GameVideoPage() {
         providerLabel: getReplaceProviderSpec(replProvider).providerLabel,
       })
       if (!checked) continue
-      accepted.push({
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      accepted.push(createReplaceBatchItem({
         name: checked.name || file.name,
         refVideo: checked.url,
         durationSeconds: checked.durationSeconds,
-        status: 'idle',
-        taskId: '',
-        error: '',
-        videoUrl: '',
-        startTime: null,
-      })
+      }))
     }
     if (accepted.length) {
       setReplaceBatchItems(prev => [...prev, ...accepted])
     }
   }, [
+    createReplaceBatchItem,
     replProvider,
+    uploadSingleFileWithFeedback,
+  ])
+
+  const updateReplaceBatchCharacterImage = useCallback(async (id, file) => {
+    if (!file) return
+    const uploaded = await uploadSingleFileWithFeedback(file, '角色图片上传失败')
+    if (!uploaded) return
+    updateReplaceBatchItem(id, {
+      charImage: uploaded,
+      error: '',
+      status: 'idle',
+      taskId: '',
+      videoUrl: '',
+      startTime: null,
+    })
+  }, [
+    updateReplaceBatchItem,
+    uploadSingleFileWithFeedback,
+  ])
+
+  const updateReplaceBatchReferenceVideo = useCallback(async (id, file) => {
+    if (!file) return
+    const item = getReplaceBatchItem(id)
+    const itemProvider = item?.provider || replProvider
+    const referenceLimits = getReplaceReferenceDurationLimits(itemProvider)
+    const uploaded = await uploadSingleFileWithFeedback(file, '参考视频上传失败')
+    if (!uploaded) return
+    const checked = await validateReferenceVideoUpload(uploaded, {
+      label: '参考视频',
+      minSeconds: referenceLimits.minSeconds,
+      maxSeconds: referenceLimits.maxSeconds,
+      providerLabel: getReplaceProviderSpec(itemProvider).providerLabel,
+    })
+    if (!checked) return
+    updateReplaceBatchItem(id, {
+      name: checked.name || file.name,
+      refVideo: checked.url,
+      durationSeconds: checked.durationSeconds,
+      status: 'idle',
+      taskId: '',
+      error: '',
+      videoUrl: '',
+      startTime: null,
+    })
+  }, [
+    getReplaceBatchItem,
+    replProvider,
+    updateReplaceBatchItem,
     uploadSingleFileWithFeedback,
   ])
 
@@ -407,9 +477,10 @@ export default function GameVideoPage() {
   }, [])
 
   const runOneReplaceBatchItem = useCallback(async (item) => {
-    if (!replCharImage || !item?.refVideo) return
-    const blockReason = getReplaceVideoBlockReason(replProvider, {
-      charImage: replCharImage,
+    if (!item?.charImage || !item?.refVideo) return
+    const itemProvider = item.provider || replProvider
+    const blockReason = getReplaceVideoBlockReason(itemProvider, {
+      charImage: item.charImage,
       refVideo: item.refVideo,
       refVideoDurationSeconds: item.durationSeconds,
     }, {
@@ -426,12 +497,12 @@ export default function GameVideoPage() {
       const result = await api.post('/api/game/replace_video', {
         project_id: currentProject?.id || '',
         ref_video_url: item.refVideo,
-        character_ref: replCharImage.url,
-        prompt: replPrompt,
-        provider: replProvider,
-        mode: replProvider === 'wan' ? replWanMode : '',
-        check_image: replProvider === 'wan' ? replWanCheckImage : false,
-        resolution: replProvider === 'jimeng' ? replVideoResolution : '720p',
+        character_ref: item.charImage.url,
+        prompt: item.prompt || '',
+        provider: itemProvider,
+        mode: itemProvider === 'wan' ? (item.wanMode || 'wan-std') : '',
+        check_image: itemProvider === 'wan' ? !!item.wanCheckImage : false,
+        resolution: itemProvider === 'jimeng' ? (item.videoResolution || '720p') : '720p',
       })
       if (result.task_record_warning) alert(result.task_record_warning)
       if (result.task_id) {
@@ -454,32 +525,28 @@ export default function GameVideoPage() {
     formatDurationSeconds,
     normalizeDurationSeconds,
     registerTaskPolling,
-    replCharImage,
-    replPrompt,
     replProvider,
-    replVideoResolution,
-    replWanCheckImage,
-    replWanMode,
     updateReplaceBatchItem,
   ])
 
   const runReplaceBatch = useCallback(async () => {
-    const runnable = replaceBatchItems.filter(item => !['processing', 'completed'].includes(item.status))
-    if (!replCharImage) {
-      alert('请先上传替换角色图片')
-      return
-    }
+    const runnable = replaceBatchItems.filter(item => item.charImage && item.refVideo && !['processing', 'completed'].includes(item.status))
     if (!runnable.length) {
-      alert('没有可提交的批量场景')
+      alert('请先给新增场景上传角色图片和参考视频')
       return
     }
-    for (let index = 0; index < runnable.length; index += 1) {
-      await runOneReplaceBatchItem(runnable[index])
-      if (index < runnable.length - 1) {
-        await new Promise(resolve => window.setTimeout(resolve, 800))
-      }
+    await Promise.all(runnable.map(item => runOneReplaceBatchItem(item)))
+  }, [replaceBatchItems, runOneReplaceBatchItem])
+
+  const runReplaceBatchItem = useCallback((id) => {
+    const item = replaceBatchItems.find(entry => entry.id === id)
+    if (!item) return
+    if (!item.charImage || !item.refVideo) {
+      updateReplaceBatchItem(id, { status: 'failed', error: '请先上传替换角色图片和参考视频' })
+      return
     }
-  }, [replaceBatchItems, replCharImage, runOneReplaceBatchItem])
+    void runOneReplaceBatchItem(item)
+  }, [replaceBatchItems, runOneReplaceBatchItem, updateReplaceBatchItem])
 
   const resumeReplaceTaskPolling = useCallback((replaceVideo) => {
     if (!replaceVideo?.replTaskId) return
@@ -1497,16 +1564,6 @@ export default function GameVideoPage() {
           )}
           {activeTab === 'replace' && (
             <div style={{ display: 'flex', gap: 8 }}>
-              <button onClick={addScene} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 12px', borderRadius: 7, fontSize: 11, fontWeight: 600, background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}><Plus size={13} /> 添加场景</button>
-              <button onClick={replaceAllScenes} disabled={replaceProcessingCount > 0} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 14px', borderRadius: 7, fontSize: 11, fontWeight: 700, background: replaceProcessingCount > 0 ? 'var(--bg-tertiary)' : 'var(--accent-gradient)', color: '#fff' }}>
-                {replaceProcessingCount > 0 ? <><Loader2 size={13} className="spin" /> 换人中 ({replaceProcessingCount})</> : <><Video size={13} /> 全部换人</>}
-              </button>
-              {replaceCompletedCount > 0 && (
-                <button onClick={downloadAll} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 12px', borderRadius: 7, fontSize: 11, fontWeight: 600, background: 'rgba(16,185,129,0.1)', color: '#10b981', border: '1px solid rgba(16,185,129,0.2)' }}><Download size={13} /> 全部导出 ({replaceCompletedCount})</button>
-              )}
-              <select value={replProvider} onChange={event => handleReplaceProviderChange(event.target.value)} style={{ padding: '6px 10px', borderRadius: 7, fontSize: 11, background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}>
-                {VIDEO_REPLACE_PROVIDER_SPECS.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
-              </select>
               <button onClick={() => setShowSettings(true)} title="API 设置" style={{ background: 'none', color: 'var(--text-muted)', padding: '6px 8px' }}><Settings size={16} /></button>
             </div>
           )}
@@ -1518,7 +1575,7 @@ export default function GameVideoPage() {
         {/* Content Area */}
         <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
           <ReplaceVideoPanel
-            active={false}
+            active={activeTab === 'replace'}
             providerSpecs={VIDEO_REPLACE_PROVIDER_SPECS}
             provider={replProvider}
             providerSpec={replaceProviderSpec}
@@ -1545,9 +1602,13 @@ export default function GameVideoPage() {
             onCharacterFileSelected={handleReplaceCharacterFileSelected}
             onClearReferenceVideo={handleClearReplaceReferenceVideo}
             onReferenceVideoFileSelected={handleReplaceReferenceVideoFileSelected}
-            onBatchReferenceVideoFilesSelected={addReplaceBatchReferenceVideos}
+            onAddBatchItem={addReplaceBatchItem}
+            onBatchItemChange={updateReplaceBatchItem}
+            onBatchCharacterFileSelected={updateReplaceBatchCharacterImage}
+            onBatchReferenceVideoFileSelected={updateReplaceBatchReferenceVideo}
             onRemoveBatchItem={removeReplaceBatchItem}
             onClearBatchItems={clearReplaceBatchItems}
+            onRunBatchItem={runReplaceBatchItem}
             onRunBatch={runReplaceBatch}
             onPromptChange={setReplPrompt}
             onResolutionChange={handleReplaceResolutionChange}
@@ -1559,7 +1620,7 @@ export default function GameVideoPage() {
             onSelectHistory={handleSelectReplaceHistory}
             onRemoveHistoryItem={handleRemoveReplaceHistoryItem}
           />
-          {activeTab === 'replace' && (
+          {false && activeTab === 'replace' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               <div style={{ maxWidth: 980, width: '100%', margin: '0 auto', background: 'var(--bg-secondary)', borderRadius: 14, border: '1px solid var(--border)', padding: 16 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>

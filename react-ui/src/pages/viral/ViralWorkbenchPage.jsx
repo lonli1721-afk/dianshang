@@ -48,9 +48,12 @@ const rewriteTargetOptions = [
   { value: 'video_prompt', label: '视频提示词' },
 ]
 const MAX_ANALYSIS_VIDEO_COUNT = 6
+const hideTemporarilyUnavailablePromptModels = (models = []) => (
+  models.filter(model => model.provider !== 'openai' && !String(model.id || '').toLowerCase().startsWith('gpt'))
+)
 const FALLBACK_MODELS = [
+  { id: 'doubao-seed-2-0-pro-260215', name: '火山 Doubao Seed 2.0 Pro', provider: 'ark' },
   { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', provider: 'gemini' },
-  { id: 'gpt-5.4', name: 'GPT-5.4', provider: 'openai' },
   { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'gemini' },
   { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', provider: 'gemini' },
 ]
@@ -507,7 +510,8 @@ export default function ViralWorkbenchPage() {
     let cancelled = false
     api.get('/api/viral/models')
       .then(data => {
-        if (!cancelled && Array.isArray(data.models) && data.models.length) setModels(data.models)
+        const visibleModels = hideTemporarilyUnavailablePromptModels(data.models || [])
+        if (!cancelled && visibleModels.length) setModels(visibleModels)
       })
       .catch(() => {})
     return () => {

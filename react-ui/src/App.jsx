@@ -1,5 +1,5 @@
 import { Component, Suspense, lazy, useState, useEffect, useLayoutEffect } from 'react'
-import { HashRouter, Routes, Route } from 'react-router-dom'
+import { HashRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { TaskProvider } from './components/TaskLog'
 import TitleBar from './components/TitleBar'
 import Sidebar from './components/Sidebar'
@@ -8,8 +8,11 @@ import ViralWorkbenchPage from './pages/viral/ViralWorkbenchPage'
 import LoginPage from './pages/LoginPage'
 
 const THEME_MODES = new Set(['system', 'light', 'dark'])
+const IMAGE_TOOLBOX_TESTER_USERNAMES = new Set(['zhouyanqing', 'caipeiling', 'huanglin', 'huangye'])
 const loadSettingsPage = () => import('./pages/SettingsPage')
+const loadImageToolboxPage = () => import('./pages/ImageToolboxPage')
 const SettingsPage = lazy(loadSettingsPage)
+const ImageToolboxPage = lazy(loadImageToolboxPage)
 
 function preloadSettingsPage() {
   void loadSettingsPage().catch(() => {})
@@ -187,6 +190,10 @@ function shouldCollapseSidebar() {
   return typeof window !== 'undefined' && window.innerWidth < 760
 }
 
+function canUseImageToolbox(user) {
+  return user?.role === 'admin' || IMAGE_TOOLBOX_TESTER_USERNAMES.has(user?.username || '')
+}
+
 export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => shouldCollapseSidebar())
   const [authEnabled, setAuthEnabled] = useState(null)
@@ -282,6 +289,7 @@ export default function App() {
     localStorage.removeItem('user')
     setUser(null)
   }
+  const canAccessImageToolbox = canUseImageToolbox(user)
 
   if (checking) {
     return (
@@ -325,6 +333,16 @@ export default function App() {
                   <Route path="/" element={<GameVideoPage />} />
                   <Route path="/game-video" element={<GameVideoPage />} />
                   <Route path="/viral-workbench" element={<ViralWorkbenchPage />} />
+                  <Route
+                    path="/image-toolbox"
+                    element={canAccessImageToolbox ? (
+                      <Suspense fallback={<RouteLoadingFallback />}>
+                        <ImageToolboxPage />
+                      </Suspense>
+                    ) : (
+                      <Navigate to="/" replace />
+                    )}
+                  />
                   <Route
                     path="/settings"
                     element={(

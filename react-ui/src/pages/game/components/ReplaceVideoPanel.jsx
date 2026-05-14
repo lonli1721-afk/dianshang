@@ -14,17 +14,251 @@ function selectSingleFile(accept, onSelect) {
   input.click()
 }
 
-function selectMultipleFiles(accept, onSelect) {
-  if (typeof document === 'undefined') return
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.accept = accept
-  input.multiple = true
-  input.onchange = (event) => {
-    const files = Array.from(event.target.files || [])
-    if (files.length) void onSelect(files)
-  }
-  input.click()
+function getProviderSpec(providerSpecs, provider) {
+  return providerSpecs.find(item => item.id === provider) || providerSpecs[0]
+}
+
+function ReplaceSceneCard({
+  sceneLabel,
+  providerSpecs,
+  provider,
+  providerSpec,
+  blockReason,
+  durationHint,
+  charImage,
+  refVideo,
+  prompt,
+  videoResolution,
+  wanMode,
+  wanCheckImage,
+  status,
+  error,
+  videoUrl,
+  taskId,
+  retryingResultCache,
+  startTime,
+  history = [],
+  elapsed,
+  onProviderChange,
+  onOpenImage,
+  onClearCharacterImage,
+  onCharacterFileSelected,
+  onClearReferenceVideo,
+  onReferenceVideoFileSelected,
+  onPromptChange,
+  onResolutionChange,
+  onWanModeChange,
+  onWanCheckImageChange,
+  onRun,
+  onRetryResultCache,
+  onResetResult,
+  onSelectHistory,
+  onRemoveHistoryItem,
+  onRemoveScene,
+}) {
+  const canRunReplace = status !== 'processing' && !blockReason
+  const buttonBg = canRunReplace ? 'var(--accent-gradient)' : 'rgba(124,58,237,0.14)'
+  const buttonColor = canRunReplace ? '#fff' : 'rgba(124,58,237,0.95)'
+  const buttonBorder = canRunReplace ? 'none' : '1px solid rgba(124,58,237,0.25)'
+  const buttonShadow = canRunReplace ? '0 6px 18px rgba(59,130,246,0.22)' : 'none'
+  const canRetryResultCache = !!taskId && isProviderVideoCacheError(error) && typeof onRetryResultCache === 'function'
+  const displayError = formatProviderVideoCacheError(error)
+
+  return (
+    <div style={{ background: 'var(--bg-secondary)', borderRadius: 14, border: '1px solid var(--border)', padding: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+        {sceneLabel && (
+          <span style={{ padding: '4px 10px', borderRadius: 999, background: 'rgba(139,92,246,0.12)', color: 'var(--accent)', fontSize: 12, fontWeight: 800, border: '1px solid rgba(139,92,246,0.25)' }}>
+            {sceneLabel}
+          </span>
+        )}
+        <RefreshCw size={18} color="var(--accent)" />
+        <span style={{ fontSize: 15, fontWeight: 600 }}>视频换人</span>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>上传角色图片 + 参考视频，AI 替换视频中的人物，保持动作/场景不变</span>
+        {onRemoveScene && (
+          <button type="button" onClick={onRemoveScene} title="删除场景" style={{ background: 'none', color: 'var(--text-muted)', padding: 4, lineHeight: 0 }}>
+            <X size={15} />
+          </button>
+        )}
+      </div>
+
+      <div style={{ marginBottom: 14, display: 'flex', gap: 8 }}>
+        {providerSpecs.map(item => (
+          <button key={item.id} onClick={() => onProviderChange(item.id)} style={{
+            flex: 1, padding: '8px 10px', borderRadius: 8, textAlign: 'left',
+            background: provider === item.id ? 'rgba(139,92,246,0.1)' : 'var(--bg-primary)',
+            border: provider === item.id ? '1.5px solid var(--accent)' : '1px solid var(--border)',
+            cursor: 'pointer',
+          }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: provider === item.id ? 'var(--accent)' : 'var(--text-primary)' }}>{item.label}</div>
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>{item.desc}</div>
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
+        <div style={{ flex: 1 }}>
+          <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, display: 'block' }}>
+            <User size={12} style={{ verticalAlign: -2, marginRight: 4 }} />替换角色图片（必须）
+          </label>
+          {charImage ? (
+            <div
+              role="button"
+              tabIndex={0}
+              title="点击查看大图"
+              onClick={() => onOpenImage(charImage.url)}
+              onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpenImage(charImage.url) } }}
+              style={{ position: 'relative', display: 'inline-block', cursor: 'pointer' }}
+            >
+              <img src={mediaUrl(charImage.url)} alt="" loading="lazy" decoding="async" style={{ width: 120, height: 120, objectFit: 'cover', borderRadius: 10, border: '2px solid var(--accent)', display: 'block', pointerEvents: 'none', userSelect: 'none' }} />
+              <button type="button" onClick={event => { event.stopPropagation(); onClearCharacterImage() }} style={{ position: 'absolute', top: 4, right: 4, background: 'rgba(0,0,0,0.7)', color: '#fff', borderRadius: 6, padding: 3, lineHeight: 0, zIndex: 1 }}><X size={12} /></button>
+            </div>
+          ) : (
+            <button onClick={() => selectSingleFile('image/*', onCharacterFileSelected)} style={{
+              width: 120, height: 120, borderRadius: 10, background: 'var(--bg-primary)',
+              border: '2px dashed rgba(139,92,246,0.3)', color: 'var(--accent)', cursor: 'pointer',
+              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6,
+            }}>
+              <User size={24} style={{ opacity: 0.5 }} />
+              <span style={{ fontSize: 11 }}>上传角色</span>
+            </button>
+          )}
+        </div>
+
+        <div style={{ flex: 2 }}>
+          <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, display: 'block' }}>
+            <Video size={12} style={{ verticalAlign: -2, marginRight: 4 }} />参考视频（必须）
+          </label>
+          {refVideo ? (
+            <>
+              <div style={{ position: 'relative' }}>
+                <video src={mediaUrl(refVideo)} controls preload="none" style={{ width: '100%', maxHeight: 200, borderRadius: 10, background: '#000', display: 'block' }} />
+                <button onClick={onClearReferenceVideo} style={{ position: 'absolute', top: 6, right: 6, background: 'rgba(0,0,0,0.7)', color: '#fff', borderRadius: 6, padding: 3, lineHeight: 0 }}><X size={14} /></button>
+              </div>
+              {durationHint && (
+                <div style={{ marginTop: 6, fontSize: 11, lineHeight: 1.6, color: blockReason ? '#ef4444' : '#10b981' }}>
+                  {durationHint}
+                </div>
+              )}
+            </>
+          ) : (
+            <button onClick={() => selectSingleFile('video/*', onReferenceVideoFileSelected)} style={{
+              width: '100%', padding: '40px 0', borderRadius: 10, background: 'var(--bg-primary)',
+              border: '2px dashed var(--border)', color: 'var(--text-muted)', cursor: 'pointer',
+              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+            }}>
+              <Upload size={24} style={{ opacity: 0.4 }} />
+              <span style={{ fontSize: 12 }}>上传要替换的原视频</span>
+              <span style={{ fontSize: 10, opacity: 0.6 }}>{providerSpec.uploadHint}</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {providerSpec.supports_prompt && (
+        <div style={{ marginBottom: 12 }}>
+          <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>提示词（可选）</label>
+          <textarea value={prompt} onChange={event => onPromptChange(event.target.value)} placeholder="可描述动作、表情等（留空则自动模仿参考视频动作）"
+            style={{ width: '100%', padding: '8px 12px', borderRadius: 8, background: 'var(--bg-primary)', border: '1px solid var(--border)', color: 'var(--text-primary)', fontSize: 12, resize: 'vertical', minHeight: 40, maxHeight: 100, boxSizing: 'border-box' }} />
+          <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)' }}>清晰度</label>
+            <select value={videoResolution} onChange={event => onResolutionChange(event.target.value)}
+              style={{ padding: '4px 8px', borderRadius: 6, background: 'var(--bg-primary)', border: '1px solid var(--border)', color: 'var(--text-primary)', fontSize: 11 }}>
+              {VIDEO_RESOLUTION_OPTIONS
+                .filter(option => !providerSpec.supported_resolutions || providerSpec.supported_resolutions.includes(option.id))
+                .map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
+            </select>
+            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>1080P 更接近网页端质感，费用更高</span>
+          </div>
+        </div>
+      )}
+
+      {providerSpec.wan_modes && (
+        <div style={{ marginBottom: 12, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)' }}>万相模式</label>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {providerSpec.wan_modes.map(mode => (
+              <button key={mode.id} type="button" onClick={() => onWanModeChange(mode.id)} style={{
+                padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700,
+                background: wanMode === mode.id ? 'rgba(139,92,246,0.12)' : 'var(--bg-primary)',
+                color: wanMode === mode.id ? 'var(--accent)' : 'var(--text-muted)',
+                border: wanMode === mode.id ? '1px solid rgba(139,92,246,0.35)' : '1px solid var(--border)',
+              }}>
+                {mode.label}<span style={{ marginLeft: 4, fontSize: 9, opacity: 0.65 }}>{mode.desc}</span>
+              </button>
+            ))}
+          </div>
+          {providerSpec.supports_check_image && (
+            <label style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-muted)', cursor: 'pointer' }}>
+              <input type="checkbox" checked={wanCheckImage} onChange={event => onWanCheckImageChange(event.target.checked)} />
+              严格检测人像
+            </label>
+          )}
+        </div>
+      )}
+
+      <div style={{ marginBottom: 16 }}>
+        <button onClick={onRun} title={blockReason} disabled={status === 'processing' || !!blockReason} style={{
+          width: '100%', padding: '10px 0', borderRadius: 10, fontSize: 13, fontWeight: 700,
+          background: buttonBg, color: buttonColor, border: buttonBorder, boxShadow: buttonShadow,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+          cursor: canRunReplace ? 'pointer' : 'not-allowed',
+        }}>
+          {status === 'processing' ? <><Loader2 size={14} className="spin" /> 处理中 ({elapsed(startTime)}s)</> : <><RefreshCw size={14} /> {providerSpec.actionLabel}</>}
+        </button>
+        {blockReason && (
+          <div style={{ marginTop: 8, fontSize: 11, lineHeight: 1.6, color: 'rgba(124,58,237,0.95)', background: 'rgba(124,58,237,0.08)', border: '1px solid rgba(124,58,237,0.16)', borderRadius: 8, padding: '8px 10px' }}>
+            {blockReason}
+          </div>
+        )}
+      </div>
+
+      {displayError && (
+        <div style={{ fontSize: 11, color: '#ef4444', marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{ lineHeight: 1.6 }}>{displayError}</span>
+          {canRetryResultCache && (
+            <button type="button" onClick={onRetryResultCache} disabled={retryingResultCache} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 9px', borderRadius: 6, fontSize: 11, fontWeight: 700, background: 'rgba(59,130,246,0.1)', color: '#2563eb', border: '1px solid rgba(59,130,246,0.2)', cursor: retryingResultCache ? 'default' : 'pointer' }}>
+              {retryingResultCache ? <Loader2 size={11} className="spin" /> : <RefreshCw size={11} />}
+              重新拉取结果
+            </button>
+          )}
+        </div>
+      )}
+
+      {videoUrl && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>替换结果</div>
+          <video src={mediaUrl(videoUrl)} controls preload="none" style={{ width: '100%', maxHeight: 360, borderRadius: 10, background: '#000', display: 'block' }} />
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <a href={mediaUrl(videoUrl)} download target="_blank" rel="noreferrer" style={{ flex: 1, padding: '8px 0', borderRadius: 6, fontSize: 12, fontWeight: 600, background: 'rgba(16,185,129,0.1)', color: '#10b981', border: '1px solid rgba(16,185,129,0.2)', textAlign: 'center', textDecoration: 'none' }}>下载视频</a>
+            {onResetResult && <button onClick={onResetResult} style={{ flex: 1, padding: '8px 0', borderRadius: 6, fontSize: 12, fontWeight: 600, background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}>重新替换</button>}
+          </div>
+        </div>
+      )}
+
+      {history.length > 0 && (
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>历史记录 ({history.length})</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+            {history.map((item, index) => (
+              <div key={index} style={{ borderRadius: 8, overflow: 'hidden', border: item.url === videoUrl ? '2px solid var(--accent)' : '1px solid var(--border)', background: '#000', cursor: 'pointer', position: 'relative' }}
+                onClick={() => onSelectHistory(item)}>
+                <video src={mediaUrl(item.url)} preload="none" style={{ width: '100%', aspectRatio: '16/9', objectFit: 'cover', display: 'block' }} />
+                <div style={{ padding: '4px 6px', background: 'var(--bg-tertiary)', fontSize: 10, color: 'var(--text-muted)' }}>
+                  {new Date(item.ts).toLocaleString()}
+                </div>
+                <button type="button" title="从历史中移除" onClick={event => { event.stopPropagation(); onRemoveHistoryItem(index) }} style={{ position: 'absolute', top: 4, right: 4, background: 'rgba(0,0,0,0.75)', color: '#fff', borderRadius: 6, padding: 2, lineHeight: 0, zIndex: 1 }}><X size={12} /></button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{ marginTop: 16, padding: '10px 14px', borderRadius: 8, background: 'rgba(139,92,246,0.05)', border: '1px solid rgba(139,92,246,0.1)' }}>
+        <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0, lineHeight: 1.8 }}>{providerSpec.infoText}</p>
+      </div>
+    </div>
+  )
 }
 
 export default function ReplaceVideoPanel({
@@ -55,9 +289,11 @@ export default function ReplaceVideoPanel({
   onCharacterFileSelected,
   onClearReferenceVideo,
   onReferenceVideoFileSelected,
-  onBatchReferenceVideoFilesSelected,
-  onRemoveBatchItem,
-  onClearBatchItems,
+  onAddBatchItem,
+  onBatchItemChange,
+  onBatchCharacterFileSelected,
+  onBatchReferenceVideoFileSelected,
+  onRunBatchItem,
   onRunBatch,
   onPromptChange,
   onResolutionChange,
@@ -68,309 +304,113 @@ export default function ReplaceVideoPanel({
   onResetResult,
   onSelectHistory,
   onRemoveHistoryItem,
+  onRemoveBatchItem,
 }) {
   if (!active) return null
 
-  const canRunReplace = status !== 'processing' && !blockReason
-  const buttonBg = canRunReplace ? 'var(--accent-gradient)' : 'rgba(124,58,237,0.14)'
-  const buttonColor = canRunReplace ? '#fff' : 'rgba(124,58,237,0.95)'
-  const buttonBorder = canRunReplace ? 'none' : '1px solid rgba(124,58,237,0.25)'
-  const buttonShadow = canRunReplace ? '0 6px 18px rgba(59,130,246,0.22)' : 'none'
-  const canRetryResultCache = !!taskId && isProviderVideoCacheError(error) && typeof onRetryResultCache === 'function'
-  const displayError = formatProviderVideoCacheError(error)
-  const batchProcessingCount = batchItems.filter(item => item.status === 'processing').length
-  const batchDoneCount = batchItems.filter(item => item.status === 'completed').length
-  const canRunBatch = batchItems.length > 0 && batchProcessingCount === 0 && status !== 'processing' && !blockReason
+  const runnableBatchCount = batchItems.filter(item => item.charImage && item.refVideo && !['processing', 'completed'].includes(item.status)).length
 
   return (
     <div>
-      <div style={{ maxWidth: 700, margin: '0 auto' }}>
-        <div style={{ background: 'var(--bg-secondary)', borderRadius: 14, border: '1px solid var(--border)', padding: 20 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
-            <RefreshCw size={18} color="var(--accent)" />
-            <span style={{ fontSize: 15, fontWeight: 600 }}>视频换人</span>
-            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>上传角色图片 + 参考视频，AI 替换视频中的人物，保持动作/场景不变</span>
-          </div>
+      <div style={{ maxWidth: 700, margin: '0 auto', display: 'grid', gap: 14 }}>
+        <ReplaceSceneCard
+          sceneLabel="场景 1"
+          providerSpecs={providerSpecs}
+          provider={provider}
+          providerSpec={providerSpec}
+          blockReason={blockReason}
+          durationHint={durationHint}
+          charImage={charImage}
+          refVideo={refVideo}
+          prompt={prompt}
+          videoResolution={videoResolution}
+          wanMode={wanMode}
+          wanCheckImage={wanCheckImage}
+          status={status}
+          error={error}
+          videoUrl={videoUrl}
+          taskId={taskId}
+          retryingResultCache={retryingResultCache}
+          startTime={startTime}
+          history={history}
+          elapsed={elapsed}
+          onProviderChange={onProviderChange}
+          onOpenImage={onOpenImage}
+          onClearCharacterImage={onClearCharacterImage}
+          onCharacterFileSelected={onCharacterFileSelected}
+          onClearReferenceVideo={onClearReferenceVideo}
+          onReferenceVideoFileSelected={onReferenceVideoFileSelected}
+          onPromptChange={onPromptChange}
+          onResolutionChange={onResolutionChange}
+          onWanModeChange={onWanModeChange}
+          onWanCheckImageChange={onWanCheckImageChange}
+          onRun={onRun}
+          onRetryResultCache={onRetryResultCache}
+          onResetResult={onResetResult}
+          onSelectHistory={onSelectHistory}
+          onRemoveHistoryItem={onRemoveHistoryItem}
+        />
 
-          <div style={{ marginBottom: 14, display: 'flex', gap: 8 }}>
-            {providerSpecs.map(item => (
-              <button key={item.id} onClick={() => onProviderChange(item.id)} style={{
-                flex: 1, padding: '8px 10px', borderRadius: 8, textAlign: 'left',
-                background: provider === item.id ? 'rgba(139,92,246,0.1)' : 'var(--bg-primary)',
-                border: provider === item.id ? '1.5px solid var(--accent)' : '1px solid var(--border)',
-                cursor: 'pointer',
-              }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: provider === item.id ? 'var(--accent)' : 'var(--text-primary)' }}>{item.label}</div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>{item.desc}</div>
-              </button>
-            ))}
-          </div>
+        {batchItems.map((item, index) => {
+          const itemProviderSpec = getProviderSpec(providerSpecs, item.provider)
+          return (
+            <ReplaceSceneCard
+              key={item.id}
+              sceneLabel={`场景 ${index + 2}`}
+              providerSpecs={providerSpecs}
+              provider={item.provider}
+              providerSpec={itemProviderSpec}
+              blockReason=""
+              durationHint=""
+              charImage={item.charImage}
+              refVideo={item.refVideo}
+              prompt={item.prompt || ''}
+              videoResolution={item.videoResolution || '720p'}
+              wanMode={item.wanMode || 'wan-std'}
+              wanCheckImage={!!item.wanCheckImage}
+              status={item.status || 'idle'}
+              error={item.error || ''}
+              videoUrl={item.videoUrl || ''}
+              taskId={item.taskId || ''}
+              retryingResultCache={false}
+              startTime={item.startTime}
+              history={[]}
+              elapsed={elapsed}
+              onProviderChange={next => onBatchItemChange(item.id, { provider: next, error: '', status: 'idle' })}
+              onOpenImage={onOpenImage}
+              onClearCharacterImage={() => onBatchItemChange(item.id, { charImage: null, error: '', status: 'idle' })}
+              onCharacterFileSelected={file => onBatchCharacterFileSelected(item.id, file)}
+              onClearReferenceVideo={() => onBatchItemChange(item.id, { refVideo: '', durationSeconds: null, error: '', status: 'idle' })}
+              onReferenceVideoFileSelected={file => onBatchReferenceVideoFileSelected(item.id, file)}
+              onPromptChange={value => onBatchItemChange(item.id, { prompt: value })}
+              onResolutionChange={value => onBatchItemChange(item.id, { videoResolution: value })}
+              onWanModeChange={value => onBatchItemChange(item.id, { wanMode: value })}
+              onWanCheckImageChange={value => onBatchItemChange(item.id, { wanCheckImage: value })}
+              onRun={() => onRunBatchItem(item.id)}
+              onRemoveScene={() => onRemoveBatchItem(item.id)}
+            />
+          )
+        })}
 
-          <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
-            <div style={{ flex: 1 }}>
-              <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, display: 'block' }}>
-                <User size={12} style={{ verticalAlign: -2, marginRight: 4 }} />替换角色图片（必须）
-              </label>
-              {charImage ? (
-                <div
-                  role="button"
-                  tabIndex={0}
-                  title="点击查看大图"
-                  onClick={() => onOpenImage(charImage.url)}
-                  onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpenImage(charImage.url) } }}
-                  style={{ position: 'relative', display: 'inline-block', cursor: 'pointer' }}
-                >
-                  <img src={mediaUrl(charImage.url)} alt="" loading="lazy" decoding="async" style={{ width: 120, height: 120, objectFit: 'cover', borderRadius: 10, border: '2px solid var(--accent)', display: 'block', pointerEvents: 'none', userSelect: 'none' }} />
-                  <button type="button" onClick={event => { event.stopPropagation(); onClearCharacterImage() }} style={{ position: 'absolute', top: 4, right: 4, background: 'rgba(0,0,0,0.7)', color: '#fff', borderRadius: 6, padding: 3, lineHeight: 0, zIndex: 1 }}><X size={12} /></button>
-                </div>
-              ) : (
-                <button onClick={() => selectSingleFile('image/*', onCharacterFileSelected)} style={{
-                  width: 120, height: 120, borderRadius: 10, background: 'var(--bg-primary)',
-                  border: '2px dashed rgba(139,92,246,0.3)', color: 'var(--accent)', cursor: 'pointer',
-                  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6,
-                }}>
-                  <User size={24} style={{ opacity: 0.5 }} />
-                  <span style={{ fontSize: 11 }}>上传角色</span>
-                </button>
-              )}
-            </div>
+        <button type="button" onClick={onAddBatchItem} style={{
+          width: '100%', padding: '16px 0', borderRadius: 12,
+          background: 'var(--bg-primary)', color: 'var(--text-muted)', border: '2px dashed var(--border)',
+          fontSize: 13, fontWeight: 600, cursor: 'pointer',
+        }}>
+          + 添加新场景
+        </button>
 
-            <div style={{ flex: 2 }}>
-              <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, display: 'block' }}>
-                <Video size={12} style={{ verticalAlign: -2, marginRight: 4 }} />参考视频（必须）
-              </label>
-              {refVideo ? (
-                <>
-                  <div style={{ position: 'relative' }}>
-                    <video src={mediaUrl(refVideo)} controls preload="none" style={{ width: '100%', maxHeight: 200, borderRadius: 10, background: '#000', display: 'block' }} />
-                    <button onClick={onClearReferenceVideo} style={{ position: 'absolute', top: 6, right: 6, background: 'rgba(0,0,0,0.7)', color: '#fff', borderRadius: 6, padding: 3, lineHeight: 0 }}><X size={14} /></button>
-                  </div>
-                  {durationHint && (
-                    <div style={{
-                      marginTop: 6, fontSize: 11, lineHeight: 1.6,
-                      color: blockReason ? '#ef4444' : '#10b981',
-                    }}>
-                      {durationHint}
-                    </div>
-                  )}
-                </>
-              ) : (
-                <button onClick={() => selectSingleFile('video/*', onReferenceVideoFileSelected)} style={{
-                  width: '100%', padding: '40px 0', borderRadius: 10, background: 'var(--bg-primary)',
-                  border: '2px dashed var(--border)', color: 'var(--text-muted)', cursor: 'pointer',
-                  display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
-                }}>
-                  <Upload size={24} style={{ opacity: 0.4 }} />
-                  <span style={{ fontSize: 12 }}>上传要替换的原视频</span>
-                  <span style={{ fontSize: 10, opacity: 0.6 }}>{providerSpec.uploadHint}</span>
-                </button>
-              )}
-            </div>
-          </div>
-
-          <div style={{
-            marginBottom: 16,
-            padding: 12,
-            borderRadius: 12,
-            border: '1px solid rgba(139,92,246,0.18)',
-            background: 'rgba(139,92,246,0.05)',
+        {batchItems.length > 0 && (
+          <button type="button" onClick={onRunBatch} disabled={runnableBatchCount === 0} style={{
+            width: '100%', padding: '11px 0', borderRadius: 10, fontSize: 13, fontWeight: 800,
+            background: runnableBatchCount > 0 ? 'var(--accent-gradient)' : 'rgba(124,58,237,0.14)',
+            color: runnableBatchCount > 0 ? '#fff' : 'rgba(124,58,237,0.95)',
+            border: runnableBatchCount > 0 ? 'none' : '1px solid rgba(124,58,237,0.25)',
+            cursor: runnableBatchCount > 0 ? 'pointer' : 'not-allowed',
           }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-              <Video size={14} color="var(--accent)" />
-              <strong style={{ fontSize: 13 }}>批量换人场景</strong>
-              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>同一张角色图，可一次上传多个参考视频排队替换</span>
-              <button
-                type="button"
-                onClick={() => selectMultipleFiles('video/*', onBatchReferenceVideoFilesSelected)}
-                style={{ marginLeft: 'auto', padding: '5px 10px', borderRadius: 7, fontSize: 11, fontWeight: 700, background: 'var(--bg-primary)', color: 'var(--accent)', border: '1px solid rgba(139,92,246,0.24)' }}
-              >
-                + 添加多个场景
-              </button>
-              {batchItems.length > 0 && (
-                <button
-                  type="button"
-                  onClick={onClearBatchItems}
-                  style={{ padding: '5px 10px', borderRadius: 7, fontSize: 11, background: 'var(--bg-primary)', color: 'var(--text-muted)', border: '1px solid var(--border)' }}
-                >
-                  清空
-                </button>
-              )}
-            </div>
-            {batchItems.length === 0 ? (
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
-                适合“同一个角色替换多个视频场景”的情况。先上传上方角色图，再点“添加多个场景”选择多个视频。
-              </div>
-            ) : (
-              <>
-                <div style={{ display: 'grid', gap: 8, marginBottom: 10 }}>
-                  {batchItems.map((item, index) => (
-                    <div key={item.id} style={{ display: 'grid', gridTemplateColumns: '52px 1fr 110px 28px', gap: 8, alignItems: 'center', padding: 8, borderRadius: 10, background: 'var(--bg-primary)', border: '1px solid var(--border)' }}>
-                      <video src={mediaUrl(item.videoUrl || item.refVideo)} preload="none" muted playsInline style={{ width: 52, height: 52, borderRadius: 8, objectFit: 'cover', background: '#000' }} />
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          场景 {index + 1} · {item.name || '参考视频'}
-                        </div>
-                        <div style={{ fontSize: 10, color: item.status === 'failed' ? '#ef4444' : 'var(--text-muted)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {item.status === 'processing'
-                            ? `处理中 ${elapsed(item.startTime)}s`
-                            : item.status === 'completed'
-                              ? '已完成，可下载'
-                              : item.status === 'failed'
-                                ? (item.error || '失败')
-                                : '待提交'}
-                        </div>
-                      </div>
-                      {item.videoUrl ? (
-                        <a href={mediaUrl(item.videoUrl)} download={`批量换人-场景${index + 1}.mp4`} target="_blank" rel="noreferrer" style={{ textAlign: 'center', padding: '6px 0', borderRadius: 7, fontSize: 11, fontWeight: 700, background: 'rgba(16,185,129,0.1)', color: '#10b981', border: '1px solid rgba(16,185,129,0.2)', textDecoration: 'none' }}>
-                          下载结果
-                        </a>
-                      ) : (
-                        <span style={{ textAlign: 'center', fontSize: 11, color: 'var(--text-muted)' }}>
-                          {item.status === 'processing' ? '生成中' : item.status === 'failed' ? '失败' : '未生成'}
-                        </span>
-                      )}
-                      <button type="button" onClick={() => onRemoveBatchItem(item.id)} style={{ width: 28, height: 28, borderRadius: 7, background: 'var(--bg-tertiary)', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                        <X size={13} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  onClick={onRunBatch}
-                  disabled={!canRunBatch}
-                  style={{
-                    width: '100%',
-                    padding: '9px 0',
-                    borderRadius: 9,
-                    fontSize: 12,
-                    fontWeight: 800,
-                    background: canRunBatch ? 'var(--accent-gradient)' : 'rgba(124,58,237,0.14)',
-                    color: canRunBatch ? '#fff' : 'rgba(124,58,237,0.9)',
-                    border: canRunBatch ? 'none' : '1px solid rgba(124,58,237,0.22)',
-                    cursor: canRunBatch ? 'pointer' : 'not-allowed',
-                  }}
-                >
-                  {batchProcessingCount > 0 ? `批量处理中 ${batchDoneCount}/${batchItems.length}` : `批量开始换人（${batchItems.length} 个场景）`}
-                </button>
-              </>
-            )}
-          </div>
-
-          {providerSpec.supports_prompt && (
-            <div style={{ marginBottom: 12 }}>
-              <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>提示词（可选）</label>
-              <textarea value={prompt} onChange={event => onPromptChange(event.target.value)} placeholder="可描述动作、表情等（留空则自动模仿参考视频动作）"
-                style={{ width: '100%', padding: '8px 12px', borderRadius: 8, background: 'var(--bg-primary)', border: '1px solid var(--border)', color: 'var(--text-primary)', fontSize: 12, resize: 'vertical', minHeight: 40, maxHeight: 100, boxSizing: 'border-box' }} />
-              <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)' }}>清晰度</label>
-                <select value={videoResolution} onChange={event => onResolutionChange(event.target.value)}
-                  style={{ padding: '4px 8px', borderRadius: 6, background: 'var(--bg-primary)', border: '1px solid var(--border)', color: 'var(--text-primary)', fontSize: 11 }}>
-                  {VIDEO_RESOLUTION_OPTIONS
-                    .filter(option => !providerSpec.supported_resolutions || providerSpec.supported_resolutions.includes(option.id))
-                    .map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
-                </select>
-                <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>1080P 更接近网页端质感，费用更高</span>
-              </div>
-            </div>
-          )}
-
-          {providerSpec.wan_modes && (
-            <div style={{ marginBottom: 12, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-              <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)' }}>万相模式</label>
-              <div style={{ display: 'flex', gap: 6 }}>
-                {providerSpec.wan_modes.map(mode => (
-                  <button key={mode.id} type="button" onClick={() => onWanModeChange(mode.id)} style={{
-                    padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700,
-                    background: wanMode === mode.id ? 'rgba(139,92,246,0.12)' : 'var(--bg-primary)',
-                    color: wanMode === mode.id ? 'var(--accent)' : 'var(--text-muted)',
-                    border: wanMode === mode.id ? '1px solid rgba(139,92,246,0.35)' : '1px solid var(--border)',
-                  }}>
-                    {mode.label}<span style={{ marginLeft: 4, fontSize: 9, opacity: 0.65 }}>{mode.desc}</span>
-                  </button>
-                ))}
-              </div>
-              {providerSpec.supports_check_image && (
-                <label style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-muted)', cursor: 'pointer' }}>
-                  <input type="checkbox" checked={wanCheckImage} onChange={event => onWanCheckImageChange(event.target.checked)} />
-                  严格检测人像
-                </label>
-              )}
-            </div>
-          )}
-
-          <div style={{ marginBottom: 16 }}>
-            <button onClick={onRun} title={blockReason} disabled={status === 'processing' || !!blockReason} style={{
-              width: '100%', padding: '10px 0', borderRadius: 10, fontSize: 13, fontWeight: 700,
-              background: buttonBg, color: buttonColor, border: buttonBorder, boxShadow: buttonShadow,
-              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-              cursor: canRunReplace ? 'pointer' : 'not-allowed',
-            }}>
-              {status === 'processing' ? <><Loader2 size={14} className="spin" /> 处理中 ({elapsed(startTime)}s)</> : <><RefreshCw size={14} /> {providerSpec.actionLabel}</>}
-            </button>
-            {blockReason && (
-              <div style={{
-                marginTop: 8,
-                fontSize: 11,
-                lineHeight: 1.6,
-                color: 'rgba(124,58,237,0.95)',
-                background: 'rgba(124,58,237,0.08)',
-                border: '1px solid rgba(124,58,237,0.16)',
-                borderRadius: 8,
-                padding: '8px 10px',
-              }}>
-                {blockReason}
-              </div>
-            )}
-          </div>
-
-          {displayError && (
-            <div style={{ fontSize: 11, color: '#ef4444', marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-              <span style={{ lineHeight: 1.6 }}>{displayError}</span>
-              {canRetryResultCache && (
-                <button type="button" onClick={onRetryResultCache} disabled={retryingResultCache} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 9px', borderRadius: 6, fontSize: 11, fontWeight: 700, background: 'rgba(59,130,246,0.1)', color: '#2563eb', border: '1px solid rgba(59,130,246,0.2)', cursor: retryingResultCache ? 'default' : 'pointer' }}>
-                  {retryingResultCache ? <Loader2 size={11} className="spin" /> : <RefreshCw size={11} />}
-                  重新拉取结果
-                </button>
-              )}
-            </div>
-          )}
-
-          {videoUrl && (
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>替换结果</div>
-              <video src={mediaUrl(videoUrl)} controls preload="none" style={{ width: '100%', maxHeight: 360, borderRadius: 10, background: '#000', display: 'block' }} />
-              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                <a href={mediaUrl(videoUrl)} download target="_blank" rel="noreferrer" style={{ flex: 1, padding: '8px 0', borderRadius: 6, fontSize: 12, fontWeight: 600, background: 'rgba(16,185,129,0.1)', color: '#10b981', border: '1px solid rgba(16,185,129,0.2)', textAlign: 'center', textDecoration: 'none' }}>下载视频</a>
-                <button onClick={onResetResult} style={{ flex: 1, padding: '8px 0', borderRadius: 6, fontSize: 12, fontWeight: 600, background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}>重新替换</button>
-              </div>
-            </div>
-          )}
-
-          {history.length > 0 && (
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>历史记录 ({history.length})</div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
-                {history.map((item, index) => (
-                  <div key={index} style={{ borderRadius: 8, overflow: 'hidden', border: item.url === videoUrl ? '2px solid var(--accent)' : '1px solid var(--border)', background: '#000', cursor: 'pointer', position: 'relative' }}
-                    onClick={() => onSelectHistory(item)}>
-                    <video src={mediaUrl(item.url)} preload="none" style={{ width: '100%', aspectRatio: '16/9', objectFit: 'cover', display: 'block' }} />
-                    <div style={{ padding: '4px 6px', background: 'var(--bg-tertiary)', fontSize: 10, color: 'var(--text-muted)' }}>
-                      {new Date(item.ts).toLocaleString()}
-                    </div>
-                    <button type="button" title="从历史中移除" onClick={event => { event.stopPropagation(); onRemoveHistoryItem(index) }} style={{ position: 'absolute', top: 4, right: 4, background: 'rgba(0,0,0,0.75)', color: '#fff', borderRadius: 6, padding: 2, lineHeight: 0, zIndex: 1 }}><X size={12} /></button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div style={{ marginTop: 16, padding: '10px 14px', borderRadius: 8, background: 'rgba(139,92,246,0.05)', border: '1px solid rgba(139,92,246,0.1)' }}>
-            <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0, lineHeight: 1.8 }}>
-              {providerSpec.infoText}
-            </p>
-          </div>
-        </div>
+            同时开始新增场景（{runnableBatchCount} 个）
+          </button>
+        )}
       </div>
     </div>
   )

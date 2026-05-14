@@ -114,6 +114,84 @@ const API_KEYS = [
 ]
 
 /* ───────── ApiKeys Panel ───────── */
+const API_USAGE_GROUPS = [
+  { id: 'fa1', label: '发一', desc: '发行事业一部（不含混变项目组）' },
+  { id: 'fa1_hunbian', label: '发一混变组', desc: '发行事业一部 / 混变项目组' },
+  { id: 'fa2', label: '发二', desc: '发行事业二部' },
+  { id: 'fa3', label: '发三', desc: '发行事业三部' },
+  { id: 'market', label: '市场发展部', desc: '市场发展部' },
+]
+
+const GROUP_API_FIELDS = [
+  { suffix: 'ark_api_key', label: '火山 ARK Key', placeholder: 'Seedance / Seedream / Doubao 使用' },
+]
+
+function maskKey(value) {
+  if (!value) return ''
+  if (value.length <= 8) return '***'
+  return `${'*'.repeat(8)}${value.slice(-4)}`
+}
+
+function GroupApiKeysPanel({ keys, saved, error, onUpdateKey, onSaveKey }) {
+  const [showMap, setShowMap] = useState({})
+  const toggleShow = key => setShowMap(prev => ({ ...prev, [key]: !prev[key] }))
+
+  return (
+    <div style={{ marginTop: 24 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <Key size={15} style={{ color: 'var(--text-muted)' }} />
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: 1 }}>分组 API Key</span>
+      </div>
+      <p style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: 14 }}>
+        按发一、发二、发三、市场发展部、发一混变组分别填写火山 ARK Key。成员发起火山相关任务时会优先使用所属组 Key；未配置时自动回退到原来的全局 Key。
+      </p>
+      {API_USAGE_GROUPS.map(group => (
+        <div key={group.id} style={{ background: 'var(--bg-secondary)', borderRadius: 'var(--radius)', padding: 18, marginBottom: 12, border: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 12 }}>
+            <span style={{ fontSize: 15, fontWeight: 700 }}>{group.label}</span>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{group.desc}</span>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
+            {GROUP_API_FIELDS.map(field => {
+              const key = `group_api_${group.id}_${field.suffix}`
+              const value = keys[key] || ''
+              const visible = showMap[key]
+              return (
+                <div key={key} style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 12, background: 'var(--bg-primary)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                    <span style={{ fontSize: 12, fontWeight: 700 }}>{field.label}</span>
+                    {value && <span style={{ fontSize: 10, color: '#10b981', fontWeight: 600, background: 'rgba(16,185,129,0.1)', padding: '2px 6px', borderRadius: 6 }}>已配置</span>}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <div style={{ flex: 1, position: 'relative' }}>
+                      <input
+                        type={visible ? 'text' : 'password'}
+                        value={value}
+                        onChange={event => onUpdateKey(key, event.target.value)}
+                        placeholder={field.placeholder}
+                        style={{ width: '100%', paddingRight: 34, fontSize: 12 }}
+                      />
+                      <button type="button" onClick={() => toggleShow(key)} style={{ position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)', background: 'none', color: 'var(--text-muted)' }}>
+                        {visible ? <EyeOff size={13} /> : <Eye size={13} />}
+                      </button>
+                    </div>
+                    <button type="button" onClick={() => onSaveKey(key, value)} style={{ padding: '6px 12px', borderRadius: 7, background: 'var(--accent)', color: '#fff', fontWeight: 600, fontSize: 12 }}>
+                      保存
+                    </button>
+                  </div>
+                  {value && !visible && <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>当前：{maskKey(value)}</div>}
+                  {saved === key && <div style={{ marginTop: 6, color: '#10b981', fontSize: 11 }}>已保存</div>}
+                  {error === key && <div style={{ marginTop: 6, color: '#ef4444', fontSize: 11 }}>保存失败</div>}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function ApiKeysPanel({ keys, saved, error, onUpdateKey, onSaveKey }) {
   return (
     <div>
@@ -134,6 +212,7 @@ function ApiKeysPanel({ keys, saved, error, onUpdateKey, onSaveKey }) {
           ))}
         </div>
       ))}
+      <GroupApiKeysPanel keys={keys} saved={saved} error={error} onUpdateKey={onUpdateKey} onSaveKey={onSaveKey} />
     </div>
   )
 }

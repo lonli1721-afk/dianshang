@@ -18,6 +18,11 @@ export default function SettingsPanel({
   onToggleShowKey,
   onSave,
 }) {
+  const apiGroups = Array.isArray(gameSettings.api_usage_groups) ? gameSettings.api_usage_groups : []
+  const selectedApiGroup = settingInputs.game_api_usage_group ?? gameSettings.game_api_usage_group ?? ''
+  const resolvedApiGroup = gameSettings.resolved_api_usage_group || ''
+  const resolvedApiGroupLabel = apiGroups.find(group => group.id === resolvedApiGroup)?.label || (resolvedApiGroup ? resolvedApiGroup : '全局默认')
+
   return (
     <div style={{ padding: 32, maxWidth: 700, margin: '0 auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 28 }}>
@@ -28,6 +33,35 @@ export default function SettingsPanel({
       <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 24 }}>
         配置游戏素材工具专用的 API Key，与主应用独立。如未配置则自动使用主应用的 Key。
       </p>
+      <div style={{ background: 'var(--bg-secondary)', borderRadius: 14, padding: 20, border: '1px solid var(--border)', marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+          <Key size={14} color="#f97316" />
+          <span style={{ fontSize: 13, fontWeight: 700 }}>当前计费 / API 分组</span>
+          <span style={{ fontSize: 10, color: '#f97316', fontWeight: 700, background: 'rgba(249,115,22,0.12)', padding: '2px 6px', borderRadius: 4 }}>当前使用：{resolvedApiGroupLabel}</span>
+        </div>
+        <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10, lineHeight: 1.6 }}>
+          默认会根据账号所属部门/团队自动选择分组；如果管理员共用一个账号，可以在这里手动切换发一、发二、发三、市场发展部或发一混变组。
+        </p>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <select
+            value={selectedApiGroup}
+            onChange={event => onInputChange('game_api_usage_group', event.target.value)}
+            style={{ flex: 1, padding: '8px 12px', borderRadius: 8, background: 'var(--bg-primary)', border: '1px solid var(--border)', color: 'var(--text-primary)', fontSize: 12 }}
+          >
+            <option value="">自动识别 / 全局默认</option>
+            {apiGroups.map(group => (
+              <option key={group.id} value={group.id}>{group.label} - {group.description || group.department || ''}</option>
+            ))}
+          </select>
+          <button onClick={() => onSave('game_api_usage_group')} disabled={savingKey === 'game_api_usage_group'} style={{
+            padding: '8px 16px', borderRadius: 8, fontSize: 12, fontWeight: 600,
+            background: savingKey === 'game_api_usage_group' ? 'var(--bg-tertiary)' : 'var(--accent-gradient)', color: '#fff',
+            display: 'flex', alignItems: 'center', gap: 4,
+          }}>
+            {savingKey === 'game_api_usage_group' ? <Loader2 size={13} className="spin" /> : <Save size={13} />} 保存
+          </button>
+        </div>
+      </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         {SETTINGS_FIELDS.map(({ key, label, desc, color, multiline }) => (
           <div key={key} style={{ background: 'var(--bg-secondary)', borderRadius: 14, padding: 20, border: '1px solid var(--border)' }}>
