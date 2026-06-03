@@ -20,6 +20,10 @@ export function generateNineImages(payload) {
   return api.post('/api/image-tools/generate-nine', payload)
 }
 
+export function generateRoleImages(payload) {
+  return api.post('/api/image-tools/generate-roles', payload)
+}
+
 export function reverseStylePrompt(payload) {
   return api.post('/api/image-tools/reverse-style', payload)
 }

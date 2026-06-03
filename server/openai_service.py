@@ -75,7 +75,11 @@ class OpenAIService:
                         json=body,
                     )
                     resp.raise_for_status()
-                    return resp.json()
+                    try:
+                        return resp.json()
+                    except ValueError as exc:
+                        preview = (resp.text or "").strip()[:300] or "empty response"
+                        raise Exception(f"OpenAI 通道返回了非 JSON 响应，可能是代理连接中断或上游返回错误页：{preview}") from exc
             except httpx.HTTPStatusError as exc:
                 last_error = exc
                 status = exc.response.status_code

@@ -1,14 +1,14 @@
 import { Component, Suspense, lazy, useState, useEffect, useLayoutEffect } from 'react'
-import { HashRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { HashRouter, Routes, Route } from 'react-router-dom'
 import { TaskProvider } from './components/TaskLog'
 import TitleBar from './components/TitleBar'
 import Sidebar from './components/Sidebar'
 import GameVideoPage from './pages/game/GameVideoPage'
 import ViralWorkbenchPage from './pages/viral/ViralWorkbenchPage'
 import LoginPage from './pages/LoginPage'
+import { trackOperationEvent } from './services/api'
 
 const THEME_MODES = new Set(['system', 'light', 'dark'])
-const IMAGE_TOOLBOX_TESTER_USERNAMES = new Set(['zhouyanqing', 'caipeiling', 'huanglin', 'huangye'])
 const loadSettingsPage = () => import('./pages/SettingsPage')
 const loadImageToolboxPage = () => import('./pages/ImageToolboxPage')
 const SettingsPage = lazy(loadSettingsPage)
@@ -190,10 +190,6 @@ function shouldCollapseSidebar() {
   return typeof window !== 'undefined' && window.innerWidth < 760
 }
 
-function canUseImageToolbox(user) {
-  return user?.role === 'admin' || IMAGE_TOOLBOX_TESTER_USERNAMES.has(user?.username || '')
-}
-
 export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => shouldCollapseSidebar())
   const [authEnabled, setAuthEnabled] = useState(null)
@@ -283,14 +279,27 @@ export default function App() {
     return () => window.removeEventListener('resize', handleResize)
   }, [])
 
+  useEffect(() => {
+    const handleDownloadClick = (event) => {
+      const link = event.target?.closest?.('a[download]')
+      if (!link) return
+      const hash = window.location.hash || ''
+      let area = 'download'
+      if (hash.includes('image-toolbox')) area = 'download_image_toolbox'
+      else if (hash.includes('viral-workbench')) area = 'download_viral_workbench'
+      else if (hash.includes('game-video') || hash === '' || hash === '#/' || hash === '#') area = 'download_game_video'
+      trackOperationEvent({ operation: area })
+    }
+    document.addEventListener('click', handleDownloadClick, true)
+    return () => document.removeEventListener('click', handleDownloadClick, true)
+  }, [])
+
   const handleLogin = (userData) => { setUser(userData) }
   const handleLogout = () => {
     localStorage.removeItem('token')
     localStorage.removeItem('user')
     setUser(null)
   }
-  const canAccessImageToolbox = canUseImageToolbox(user)
-
   if (checking) {
     return (
       <div style={{
@@ -335,12 +344,10 @@ export default function App() {
                   <Route path="/viral-workbench" element={<ViralWorkbenchPage />} />
                   <Route
                     path="/image-toolbox"
-                    element={canAccessImageToolbox ? (
+                    element={(
                       <Suspense fallback={<RouteLoadingFallback />}>
                         <ImageToolboxPage />
                       </Suspense>
-                    ) : (
-                      <Navigate to="/" replace />
                     )}
                   />
                   <Route

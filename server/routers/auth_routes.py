@@ -616,7 +616,6 @@ def _count_files(root, days: int = 7, date_keys: Optional[list[str]] = None):
     for path in root.rglob("*"):
         if not path.is_file():
             continue
-        total_count += 1
         try:
             stat = path.stat()
             size = stat.st_size
@@ -624,19 +623,19 @@ def _count_files(root, days: int = 7, date_keys: Optional[list[str]] = None):
         except OSError:
             size = 0
             mtime = 0
-        total_bytes += size
         ext = path.suffix.lower()
         day = datetime.utcfromtimestamp(mtime).date().isoformat()
-        if day in daily:
-            daily[day]["storage_bytes"] += size
+        if day not in daily:
+            continue
+        total_count += 1
+        total_bytes += size
+        daily[day]["storage_bytes"] += size
         if ext in image_exts:
             image_count += 1
-            if day in daily:
-                daily[day]["image_file_count"] += 1
+            daily[day]["image_file_count"] += 1
         elif ext in video_exts:
             video_count += 1
-            if day in daily:
-                daily[day]["video_file_count"] += 1
+            daily[day]["video_file_count"] += 1
     return {
         "file_count": total_count,
         "storage_bytes": total_bytes,
@@ -669,13 +668,6 @@ def _count_user_db(db_path, days: int = 7, files_root=None, date_keys: Optional[
     try:
         keys = date_keys or _date_keys(days)
         daily = _empty_daily_from_keys(keys)
-        stats["project_count"] = conn.execute("SELECT COUNT(*) FROM game_projects").fetchone()[0]
-        stats["asset_count"] = conn.execute("SELECT COUNT(*) FROM game_assets").fetchone()[0]
-        stats["task_count"] = conn.execute("SELECT COUNT(*) FROM game_tasks").fetchone()[0]
-        stats["completed_task_count"] = conn.execute("SELECT COUNT(*) FROM game_tasks WHERE status='completed'").fetchone()[0]
-        stats["failed_task_count"] = conn.execute("SELECT COUNT(*) FROM game_tasks WHERE status='failed'").fetchone()[0]
-        stats["video_task_count"] = conn.execute("SELECT COUNT(*) FROM game_tasks WHERE type='generate'").fetchone()[0]
-        stats["replace_task_count"] = conn.execute("SELECT COUNT(*) FROM game_tasks WHERE type='replace'").fetchone()[0]
         row = conn.execute(
             """
             SELECT MAX(ts) FROM (
@@ -698,6 +690,14 @@ def _count_user_db(db_path, days: int = 7, files_root=None, date_keys: Optional[
                     daily[day]["completed_task_count"] += count
                 elif status == "failed":
                     daily[day]["failed_task_count"] += count
+        for created_at, task_type, count in conn.execute("SELECT created_at, type, COUNT(*) FROM game_tasks GROUP BY substr(created_at, 1, 10), type").fetchall():
+            day = _date_from_text(created_at)
+            if day not in daily:
+                continue
+            if task_type == "generate":
+                stats["video_task_count"] += count
+            elif task_type == "replace":
+                stats["replace_task_count"] += count
         columns = _table_columns(conn, "game_tasks")
         has_billing_snapshot = {"billable_video_seconds", "estimated_cost_cny", "billing_status"}.issubset(columns)
         if has_billing_snapshot:
@@ -723,23 +723,26 @@ def _count_user_db(db_path, days: int = 7, files_root=None, date_keys: Optional[
 
         for created_at, model, video_url, ref_video_path, snap_seconds, snap_cost, billing_status in billing_rows:
             day = _date_from_text(created_at)
+            if day not in daily:
+                continue
             if billing_status == "snapshot" and (snap_seconds or snap_cost):
                 duration, cost, priced = float(snap_seconds or 0), float(snap_cost or 0), True
             else:
                 duration, cost, priced = _task_video_cost(model, video_url, files_root, ref_video_path or "")
             stats["video_generation_count"] += 1
-            if day in daily:
-                daily[day]["video_generation_count"] += 1
+            daily[day]["video_generation_count"] += 1
             if priced:
                 stats["billable_video_seconds"] += duration
                 stats["estimated_video_cost_cny"] += cost
-                if day in daily:
-                    daily[day]["billable_video_seconds"] += duration
-                    daily[day]["estimated_video_cost_cny"] += cost
+                daily[day]["billable_video_seconds"] += duration
+                daily[day]["estimated_video_cost_cny"] += cost
             else:
                 stats["unpriced_video_task_count"] += 1
-                if day in daily:
-                    daily[day]["unpriced_video_task_count"] += 1
+                daily[day]["unpriced_video_task_count"] += 1
+        stats["project_count"] = sum(day["project_count"] for day in daily.values())
+        stats["task_count"] = sum(day["task_count"] for day in daily.values())
+        stats["completed_task_count"] = sum(day["completed_task_count"] for day in daily.values())
+        stats["failed_task_count"] = sum(day["failed_task_count"] for day in daily.values())
         stats["billable_video_seconds"] = round(stats["billable_video_seconds"], 2)
         stats["estimated_video_cost_cny"] = round(stats["estimated_video_cost_cny"], 2)
         for day in daily.values():
@@ -843,6 +846,7 @@ _PERSON_USAGE_ORG = {
     "徐杨": ("发行事业一部", "直投组"),
     "薛科文": ("发行事业一部", "直投组"),
     "杨杭": ("发行事业一部", "投创组"),
+    "杨嘉辉": ("发行事业二部", "直投组"),
     "杨洁": ("市场发展部", "TT组"),
     "杨楠": ("发行事业一部", "产品部"),
     "杨一宁": ("发行事业一部", "投创组"),
@@ -879,6 +883,16 @@ def _usage_org_for_user(user: dict) -> tuple[str, str]:
         if name in _PERSON_USAGE_ORG:
             return _PERSON_USAGE_ORG[name]
     return _usage_department_and_team(user.get("team", ""))
+
+
+def _users_in_usage_department(users: list[dict], department: str) -> list[dict]:
+    target_department = (department or "").strip()
+    if not target_department:
+        return []
+    return [
+        user for user in users
+        if _usage_org_for_user(user)[0] == target_department
+    ]
 
 
 def _usage_department_and_team(team: str) -> tuple[str, str]:
@@ -1113,21 +1127,25 @@ async def team_usage(
     full = await asyncio.to_thread(auth.get_user_full, user.get("sub", ""))
     if not full:
         raise HTTPException(401, "用户不存在")
-    team = full.get("team", "") or ""
+    current_department, current_team_group = _usage_org_for_user(full)
     date_keys = _resolve_usage_date_keys(days, start_date=start_date, end_date=end_date)
-    cache_key = ("team", team or full.get("id", ""), tuple(date_keys), (department or "").strip(), (team_group or "").strip())
+    scoped_team_group = (team_group or "").strip()
+    cache_key = ("department", current_department, tuple(date_keys), scoped_team_group)
     cached = _get_usage_cache(cache_key, refresh)
     if cached is not None:
         return cached
-    users = await asyncio.to_thread(auth.list_active_users_by_team, team) if team else [full]
+    all_users = await asyncio.to_thread(auth.list_all_user_ids)
+    users = _users_in_usage_department(all_users, current_department) or [full]
     payload = await _usage_response_for_users_filtered(
         users,
         days,
         date_keys=date_keys,
-        department=department,
-        team_group=team_group,
+        department=current_department,
+        team_group=scoped_team_group,
     )
-    payload["team"] = team
+    payload["department"] = current_department
+    payload["team"] = current_team_group
+    payload["scope"] = {"department": current_department, "team_group": current_team_group}
     return _set_usage_cache(cache_key, payload)
 
 

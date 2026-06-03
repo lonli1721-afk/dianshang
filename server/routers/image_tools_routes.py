@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
-from fastapi import APIRouter, Depends, File, Request, UploadFile
+from fastapi import APIRouter, File, Request, UploadFile
 
+import database as db
 import deps
 from image_tools_service import (
     DeriveRequest,
@@ -22,6 +24,7 @@ from image_tools_service import (
     delete_image_tool_task,
     derive_image_batch,
     generate_nine_images,
+    generate_role_images,
     get_image_tool_task,
     list_image_tool_tasks,
     list_multimodal_analysis_models,
@@ -41,17 +44,49 @@ from image_tools_service import (
 )
 from image_tools_service import _read_image_bytes  # re-exported for focused safety tests
 
-IMAGE_TOOLBOX_TESTER_USERNAMES = {"zhouyanqing", "caipeiling", "huanglin", "huangye"}
+logger = logging.getLogger("image-tools")
 
 
-def _admin_only(request: Request):
-    user = getattr(request.state, "user", None) or {}
-    if user.get("role") == "admin" or user.get("username") in IMAGE_TOOLBOX_TESTER_USERNAMES:
-        return
-    deps.require_admin(request)
+router = APIRouter()
 
 
-router = APIRouter(dependencies=[Depends(_admin_only)])
+async def _record_image_tool_event(
+    operation: str,
+    *,
+    provider: str = "",
+    model: str = "",
+    task_id: str = "",
+    status: str = "success",
+    error: str = "",
+) -> None:
+    try:
+        await asyncio.to_thread(
+            db.create_game_operation_event,
+            operation=operation,
+            provider=provider,
+            model=model,
+            task_id=task_id,
+            status=status,
+            error=error,
+        )
+    except Exception:
+        logger.exception("Failed to record image toolbox event: %s", operation)
+
+
+async def _with_image_tool_event(operation: str, provider: str, model: str, func):
+    try:
+        result = await func()
+        await _record_image_tool_event(operation, provider=provider, model=model)
+        return result
+    except Exception as exc:
+        await _record_image_tool_event(
+            operation,
+            provider=provider,
+            model=model,
+            status="failed",
+            error=str(exc),
+        )
+        raise
 
 
 @router.post("/watermark")
@@ -59,7 +94,12 @@ async def watermark(req: WatermarkRequest):
     prepared = prepare_watermark_request(req)
 
     async def _do():
-        return await apply_watermark_batch(prepared)
+        return await _with_image_tool_event(
+            "image_output_watermark",
+            "local",
+            "watermark",
+            lambda: apply_watermark_batch(prepared),
+        )
 
     return deps.keepalive_response(_do)
 
@@ -89,14 +129,52 @@ async def generate_nine(req: GenerateNineRequest):
     prepared = prepare_generate_nine_request(req)
 
     async def _do():
-        return await generate_nine_images(prepared)
+        return await _with_image_tool_event(
+            "image_generate_nine",
+            prepared.provider,
+            prepared.model,
+            lambda: generate_nine_images(prepared),
+        )
+
+    return deps.keepalive_response(_do)
+
+
+@router.post("/generate-roles")
+async def generate_roles(req: GenerateRolesRequest):
+    prepared = prepare_generate_roles_request(req)
+
+    async def _do():
+        return await _with_image_tool_event(
+            "image_generate_roles",
+            prepared.provider,
+            prepared.model,
+            lambda: generate_role_images(prepared),
+        )
 
     return deps.keepalive_response(_do)
 
 
 @router.post("/tasks")
 async def create_task(req: ImageToolTaskRequest):
-    return await create_image_tool_task(req)
+    task = await create_image_tool_task(req)
+    operation = "image_tool_task_submit"
+    if task.get("type") == "watermark":
+        operation = "image_output_submit"
+    elif task.get("type") == "reverse_prompts":
+        operation = "image_reverse_submit"
+    elif task.get("type") == "generate_roles":
+        operation = "image_generate_roles_submit"
+    elif task.get("type") == "generate_nine":
+        operation = "image_generate_nine_submit"
+    elif task.get("type") == "derive":
+        operation = "image_derive_submit"
+    await _record_image_tool_event(
+        operation,
+        provider=task.get("provider", ""),
+        model=task.get("model", ""),
+        task_id=task.get("id", ""),
+    )
+    return task
 
 
 @router.get("/tasks")
@@ -122,7 +200,12 @@ async def delete_task(task_id: str):
 @router.post("/reverse-style")
 async def reverse_style(req: ReverseStylePromptRequest):
     async def _do():
-        return await reverse_style_prompt(req)
+        return await _with_image_tool_event(
+            "image_reverse_style_prompt",
+            "gemini",
+            req.model,
+            lambda: reverse_style_prompt(req),
+        )
 
     return deps.keepalive_response(_do)
 
@@ -130,7 +213,12 @@ async def reverse_style(req: ReverseStylePromptRequest):
 @router.post("/prompt-polish")
 async def prompt_polish(req: PromptPolishRequest):
     async def _do():
-        return await polish_generation_prompt(req)
+        return await _with_image_tool_event(
+            "image_prompt_polish",
+            "gemini",
+            req.model,
+            lambda: polish_generation_prompt(req),
+        )
 
     return deps.keepalive_response(_do)
 
@@ -138,7 +226,12 @@ async def prompt_polish(req: PromptPolishRequest):
 @router.post("/role-suggestions")
 async def role_suggestions(req: RoleSuggestionRequest):
     async def _do():
-        return await suggest_role_items(req)
+        return await _with_image_tool_event(
+            "image_role_suggestions",
+            "gemini",
+            req.model,
+            lambda: suggest_role_items(req),
+        )
 
     return deps.keepalive_response(_do)
 
@@ -148,7 +241,12 @@ async def derive(req: DeriveRequest):
     prepared = prepare_derive_request(req)
 
     async def _do():
-        return await derive_image_batch(prepared)
+        return await _with_image_tool_event(
+            "image_derive",
+            prepared.provider,
+            prepared.model,
+            lambda: derive_image_batch(prepared),
+        )
 
     return deps.keepalive_response(_do)
 
@@ -156,9 +254,15 @@ async def derive(req: DeriveRequest):
 @router.post("/reverse-prompts")
 async def reverse_prompts(req: ReversePromptsRequest):
     prepared = prepare_reverse_request(req)
+    provider = "openai" if deps.is_openai_model(prepared.model) else "gemini"
 
     async def _do():
-        return await reverse_prompt_batch(prepared)
+        return await _with_image_tool_event(
+            "image_reverse_prompts",
+            provider,
+            prepared.model,
+            lambda: reverse_prompt_batch(prepared),
+        )
 
     return deps.keepalive_response(_do)
 
@@ -171,6 +275,11 @@ async def multimodal_analysis_models():
 @router.post("/multimodal-analysis")
 async def analyze_multimodal(req: MultimodalAnalysisRequest):
     async def _do():
-        return await multimodal_analysis(req)
+        return await _with_image_tool_event(
+            "multimodal_analysis",
+            "ark",
+            req.model,
+            lambda: multimodal_analysis(req),
+        )
 
     return deps.keepalive_response(_do)

@@ -153,7 +153,9 @@ export function cloneScene(scene, overrides = {}) {
 }
 
 export function normalizeScene(raw, idx, models) {
-  const scene = { ...makeScene(idx, models), ...(raw && typeof raw === 'object' ? raw : {}), idx }
+  const rawIdx = Number(raw?.idx)
+  const sceneIdx = Number.isFinite(rawIdx) && rawIdx > 0 ? rawIdx : idx
+  const scene = { ...makeScene(sceneIdx, models), ...(raw && typeof raw === 'object' ? raw : {}), idx: sceneIdx }
   const normalizedModel = typeof scene.model === 'string' && scene.model
     ? scene.model
     : (models?.[0]?.id || 'seedance-2.0')

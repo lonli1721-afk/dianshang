@@ -16,6 +16,7 @@ export function CandidateImagePicker({
   onToggleCandidate,
   onFillBatch,
   onRemove,
+  onRetryFailure,
   onSetAnchor,
   onClearSlot,
   onMoveSlot,
@@ -146,6 +147,20 @@ export function CandidateImagePicker({
               )
             })}
           </div>
+          {!!batch.failures?.length && (
+            <div className="image-tool-failure-list">
+              {batch.failures.map((failure, index) => (
+                <div key={`${batch.id}-failure-${failure.index || index}`} className="image-tool-failure-item">
+                  <span>第 {failure.index || index + 1} 张失败：{failure.error || '生成失败'}</span>
+                  {onRetryFailure && (
+                    <button type="button" onClick={() => onRetryFailure(batch, failure)}>
+                      <RotateCcw size={13} />重试这张
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </section>
         )
       })}

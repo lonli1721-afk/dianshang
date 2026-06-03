@@ -313,8 +313,18 @@ export default function ReplaceVideoPanel({
   return (
     <div>
       <div style={{ maxWidth: 700, margin: '0 auto', display: 'grid', gap: 14 }}>
-        <ReplaceSceneCard
-          sceneLabel="场景 1"
+        <button type="button" onClick={onAddBatchItem} style={{
+          width: '100%', padding: '16px 0', borderRadius: 12,
+          background: 'var(--bg-primary)', color: 'var(--text-muted)', border: '2px dashed var(--border)',
+          fontSize: 13, fontWeight: 600, cursor: 'pointer',
+          order: 0,
+        }}>
+          + 添加新场景
+        </button>
+
+        <div style={{ order: batchItems.length + 1 }}>
+          <ReplaceSceneCard
+            sceneLabel="场景 1"
           providerSpecs={providerSpecs}
           provider={provider}
           providerSpec={providerSpec}
@@ -348,15 +358,16 @@ export default function ReplaceVideoPanel({
           onRetryResultCache={onRetryResultCache}
           onResetResult={onResetResult}
           onSelectHistory={onSelectHistory}
-          onRemoveHistoryItem={onRemoveHistoryItem}
-        />
+            onRemoveHistoryItem={onRemoveHistoryItem}
+          />
+        </div>
 
         {batchItems.map((item, index) => {
           const itemProviderSpec = getProviderSpec(providerSpecs, item.provider)
           return (
-            <ReplaceSceneCard
-              key={item.id}
-              sceneLabel={`场景 ${index + 2}`}
+            <div key={item.id} style={{ order: index + 1 }}>
+              <ReplaceSceneCard
+              sceneLabel={`场景 ${Number(item.sceneNumber) || index + 2}`}
               providerSpecs={providerSpecs}
               provider={item.provider}
               providerSpec={itemProviderSpec}
@@ -387,18 +398,11 @@ export default function ReplaceVideoPanel({
               onWanModeChange={value => onBatchItemChange(item.id, { wanMode: value })}
               onWanCheckImageChange={value => onBatchItemChange(item.id, { wanCheckImage: value })}
               onRun={() => onRunBatchItem(item.id)}
-              onRemoveScene={() => onRemoveBatchItem(item.id)}
-            />
+                onRemoveScene={() => onRemoveBatchItem(item.id)}
+              />
+            </div>
           )
         })}
-
-        <button type="button" onClick={onAddBatchItem} style={{
-          width: '100%', padding: '16px 0', borderRadius: 12,
-          background: 'var(--bg-primary)', color: 'var(--text-muted)', border: '2px dashed var(--border)',
-          fontSize: 13, fontWeight: 600, cursor: 'pointer',
-        }}>
-          + 添加新场景
-        </button>
 
         {batchItems.length > 0 && (
           <button type="button" onClick={onRunBatch} disabled={runnableBatchCount === 0} style={{

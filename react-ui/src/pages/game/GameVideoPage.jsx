@@ -60,7 +60,6 @@ import ProjectListPanel from './components/ProjectListPanel'
 import GenerateVideoPanel, { GenerateVideoActions } from './components/GenerateVideoPanel'
 import GenerationRecordPanel from './components/GenerationRecordPanel'
 import ImageGenerationModal from './components/ImageGenerationModal'
-import ImageGenerationPanel from './components/ImageGenerationPanel'
 import ReplaceVideoPanel from './components/ReplaceVideoPanel'
 import ReverseVideoPanel from './components/ReverseVideoPanel'
 import SceneVideoCard from './components/SceneVideoCard'
@@ -387,7 +386,10 @@ export default function GameVideoPage() {
   }), [replProvider, replVideoResolution, replWanCheckImage, replWanMode])
 
   const addReplaceBatchItem = useCallback(() => {
-    setReplaceBatchItems(prev => [...prev, createReplaceBatchItem()])
+    setReplaceBatchItems(prev => {
+      const nextSceneNumber = Math.max(1, ...prev.map(item => Number(item.sceneNumber) || 1)) + 1
+      return [createReplaceBatchItem({ sceneNumber: nextSceneNumber }), ...prev]
+    })
   }, [createReplaceBatchItem])
 
   const addReplaceBatchReferenceVideos = useCallback(async (files) => {
@@ -412,7 +414,14 @@ export default function GameVideoPage() {
       }))
     }
     if (accepted.length) {
-      setReplaceBatchItems(prev => [...prev, ...accepted])
+      setReplaceBatchItems(prev => {
+        const startSceneNumber = Math.max(1, ...prev.map(item => Number(item.sceneNumber) || 1)) + 1
+        const numbered = accepted.map((item, index) => ({
+          ...item,
+          sceneNumber: startSceneNumber + index,
+        }))
+        return [...numbered.reverse(), ...prev]
+      })
     }
   }, [
     createReplaceBatchItem,
@@ -846,14 +855,20 @@ export default function GameVideoPage() {
 
   const addScene = () => {
     if (activeTab === 'replace') {
-      setReplScenes(prev => [...prev, makeScene(prev.length + 1, modelsRef.current)])
+      setReplScenes(prev => {
+        const nextIdx = Math.max(0, ...prev.map(scene => Number(scene.idx) || 0)) + 1
+        return [makeScene(nextIdx, modelsRef.current), ...prev]
+      })
       return
     }
-    setGenScenes(prev => [...prev, makeScene(prev.length + 1, modelsRef.current)])
+    setGenScenes(prev => {
+      const nextIdx = Math.max(0, ...prev.map(scene => Number(scene.idx) || 0)) + 1
+      return [makeScene(nextIdx, modelsRef.current), ...prev]
+    })
   }
   const removeScene = (id) => {
-    setGenScenes(prev => prev.filter(s => s.id !== id).map((s, i) => ({ ...s, idx: i + 1 })))
-    setReplScenes(prev => prev.filter(s => s.id !== id).map((s, i) => ({ ...s, idx: i + 1 })))
+    setGenScenes(prev => prev.filter(s => s.id !== id))
+    setReplScenes(prev => prev.filter(s => s.id !== id))
   }
 
   const uploadReplaceReferenceVideoToScene = useCallback((sceneId) => {
@@ -1544,7 +1559,25 @@ export default function GameVideoPage() {
 
   return (
     <>
-    <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
+    <style>{`
+      .game-video-readable [style*="font-size: 7px"] { font-size: 10px !important; }
+      .game-video-readable [style*="font-size: 8px"] { font-size: 11px !important; }
+      .game-video-readable [style*="font-size: 9px"] { font-size: 11px !important; }
+      .game-video-readable [style*="font-size: 10px"] { font-size: 12px !important; }
+      .game-video-readable [style*="font-size: 11px"] { font-size: 13px !important; }
+      .game-video-readable [style*="font-size: 12px"] { font-size: 13px !important; }
+      .game-video-readable select,
+      .game-video-readable input,
+      .game-video-readable button,
+      .game-video-readable a {
+        line-height: 1.45 !important;
+      }
+      .game-video-readable textarea {
+        font-size: 15px !important;
+        line-height: 1.8 !important;
+      }
+    `}</style>
+    <div className="game-video-readable" style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         {/* Top Bar */}
         <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--border)', background: 'var(--bg-secondary)', padding: '0 16px', flexShrink: 0 }}>
@@ -1567,7 +1600,7 @@ export default function GameVideoPage() {
               <button onClick={() => setShowSettings(true)} title="API 设置" style={{ background: 'none', color: 'var(--text-muted)', padding: '6px 8px' }}><Settings size={16} /></button>
             </div>
           )}
-          {(activeTab === 'image' || activeTab === 'reverse') && (
+          {activeTab === 'reverse' && (
             <button onClick={() => setShowSettings(true)} title="API 设置" style={{ background: 'none', color: 'var(--text-muted)', padding: '6px 8px' }}><Settings size={16} /></button>
           )}
         </div>
@@ -1650,35 +1683,6 @@ export default function GameVideoPage() {
               </button>
             </div>
           )}
-          <ImageGenerationPanel
-            active={activeTab === 'image'}
-            imageModels={imageModels}
-            model={imgGenModel}
-            aspectRatio={imgGenAspectRatio}
-            quality={normalizeImageQualityForModel(imgGenQuality, selectedStandaloneImageModel)}
-            qualityIds={standaloneImageQualityIds}
-            promptModel={imgGenPromptModel}
-            prompt={imgGenPrompt}
-            refreshing={imgGenRefreshing}
-            loading={imgGenLoading}
-            refImages={imgGenRefImages}
-            editMode={imgGenEditMode}
-            history={imgGenHistory}
-            cleanImageModelName={cleanImageModelName}
-            onModelChange={handleStandaloneImageModelChange}
-            onAspectRatioChange={handleStandaloneImageAspectRatioChange}
-            onQualityChange={handleStandaloneImageQualityChange}
-            onPromptModelChange={handleStandaloneImagePromptModelChange}
-            onPromptChange={setImgGenPrompt}
-            onRefreshPrompt={handleRefreshStandaloneImagePrompt}
-            onUploadReferenceImages={handleStandaloneReferenceImageUpload}
-            onEditModeChange={handleStandaloneImageEditModeChange}
-            onOpenImage={openImageLightbox}
-            onRemoveReferenceImage={handleRemoveStandaloneReferenceImage}
-            onGenerate={handleStandaloneGenImage}
-            onRemoveHistoryImage={removeStandaloneHistoryImage}
-            onCopyImageLink={handleCopyStandaloneImageLink}
-          />
           <ReverseVideoPanel
             active={activeTab === 'reverse'}
             videoUrl={reverseVideoUrl}

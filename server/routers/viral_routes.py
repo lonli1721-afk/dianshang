@@ -44,6 +44,11 @@ VIRAL_MODELS = [
         "provider": "gemini",
     },
     {
+        "id": "gemini-3.5-flash",
+        "name": "Gemini 3.5 Flash（实验）",
+        "provider": "gemini",
+    },
+    {
         "id": "gpt-5.4",
         "name": "GPT-5.4",
         "provider": "openai",
@@ -124,10 +129,14 @@ def _ensure_chinese_user_texts(values: list[str], context: str) -> None:
 
 def _friendly_viral_error(exc: Exception) -> str:
     msg = str(exc).strip()
+    if "Expecting value" in msg or "JSONDecodeError" in msg or "非 JSON" in msg or "empty response" in msg:
+        return "模型通道返回了空响应或非 JSON 内容，通常是代理连接中断、上游返回错误页或模型服务临时异常；请稍后重试，或切换到其他可用模型。"
     if isinstance(exc, ViralChineseOutputError):
         return "模型返回了英文内容，系统已按规则拦截。请重新生成。"
     if "429" in msg or "RESOURCE_EXHAUSTED" in msg or "Too Many Requests" in msg:
         return "模型当前触发限流或配额不足，请稍后重试。"
+    if "500" in msg or "INTERNAL" in msg:
+        return "爆款视频分析失败：模型上游返回内部错误。通常是当前模型暂时不稳定、视频素材过大，或新模型权限还未完全开放；请稍后重试，或切换到 Gemini 2.5 Flash / Doubao Seed 2.0 Pro。"
     if "503" in msg or "UNAVAILABLE" in msg or "high demand" in msg:
         return "模型服务当前繁忙，请稍后重试。"
     if "504" in msg or "DEADLINE_EXCEEDED" in msg or "timeout" in msg.lower():
@@ -146,6 +155,8 @@ def _is_expected_viral_model_error(exc: Exception) -> bool:
     return isinstance(exc, ViralChineseOutputError) or any(
         token in msg
         for token in (
+            "500",
+            "INTERNAL",
             "429",
             "RESOURCE_EXHAUSTED",
             "Too Many Requests",
@@ -360,7 +371,11 @@ async def _ark_chat_completion(
                 except Exception:
                     msg = resp.text
                 raise HTTPException(resp.status_code, f"火山模型请求失败：{msg[:300]}")
-            return resp.json()
+            try:
+                return resp.json()
+            except ValueError as exc:
+                preview = (resp.text or "").strip()[:300] or "empty response"
+                raise HTTPException(502, f"火山模型返回了非 JSON 响应，可能是代理连接中断或上游返回错误页：{preview}") from exc
 
     data = await _provider_call("ark", operation, _call)
     return str((data.get("choices") or [{}])[0].get("message", {}).get("content") or "")

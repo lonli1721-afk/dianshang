@@ -1,9 +1,8 @@
-import { ImageIcon, RefreshCw, Scan, Video } from 'lucide-react'
+import { RefreshCw, Scan, Video } from 'lucide-react'
 
 const WORKBENCH_TABS = [
   { id: 'generate', label: '生成视频', icon: Video },
   { id: 'replace', label: '视频替换', icon: RefreshCw },
-  { id: 'image', label: '图片生成', icon: ImageIcon },
   { id: 'reverse', label: '视频反推', icon: Scan },
 ]
 

@@ -1,5 +1,6 @@
 import { Ban, ChevronDown, ChevronUp, LocateFixed, RefreshCw, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
+import { assetUrl, imageResultsFromPayload } from '../helpers'
 import { PanelNotice } from './PanelNotice'
 
 const TASK_LABELS = {
@@ -22,6 +23,13 @@ const ACTIVE_STATUSES = new Set(['queued', 'running'])
 const MATERIAL_TASKS = new Set(['generate_nine', 'generate_roles'])
 
 const hasTaskResult = (task) => task.status === 'completed' && Boolean(task.result_payload)
+const taskPreviewImages = (task) => {
+  if (!hasTaskResult(task)) return []
+  const payload = task.result_payload || {}
+  const images = imageResultsFromPayload(payload)
+  if (payload?.grid?.url) images.push(payload.grid)
+  return images
+}
 const taskResultLabel = (task) => {
   if (task.status !== 'completed') return ''
   if (MATERIAL_TASKS.has(task.type)) return '已加入素材池'
@@ -164,6 +172,7 @@ export function TaskQueuePanel({
         {visibleTasks.map(task => {
           const active = task.status === 'queued' || task.status === 'running'
           const resultLabel = taskResultLabel(task)
+          const previewImages = taskPreviewImages(task)
           return (
             <article key={task.task_id} className={`image-tool-task-card is-${task.status}`}>
               <div className="image-tool-task-body">
@@ -177,6 +186,26 @@ export function TaskQueuePanel({
                     <span>{STATUS_LABELS[task.status] || task.status}</span>
                   </span>
                 </div>
+                {!!previewImages.length && (
+                  <div className="image-tool-task-previews" aria-label="任务结果预览">
+                    {previewImages.slice(0, 4).map((image, index) => (
+                      <button
+                        key={`${image.url}-${index}`}
+                        type="button"
+                        className="image-tool-task-preview"
+                        onClick={() => onLocate?.(task)}
+                        title="查看这条任务的结果"
+                      >
+                        <img src={assetUrl(image.url)} alt={`结果预览 ${index + 1}`} loading="lazy" decoding="async" />
+                      </button>
+                    ))}
+                    {previewImages.length > 4 && (
+                      <button type="button" className="image-tool-task-preview-more" onClick={() => onLocate?.(task)}>
+                        +{previewImages.length - 4}
+                      </button>
+                    )}
+                  </div>
+                )}
                 <div className="image-tool-task-foot">
                   {resultLabel && <small className="image-tool-task-result">{resultLabel}</small>}
                   {task.error && <p>{task.error}</p>}

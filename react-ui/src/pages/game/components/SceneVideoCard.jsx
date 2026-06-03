@@ -107,11 +107,28 @@ export default function SceneVideoCard({
   )
 
   return (
-    <div key={scene.id} style={{
+    <div key={scene.id} className="game-scene-readable" style={{
       background: 'var(--bg-secondary)', borderRadius: 14, border: '1px solid var(--border)',
       borderLeftWidth: 3,
       borderLeftColor: scene.status === 'completed' ? '#10b981' : scene.status === 'failed' ? '#ef4444' : (scene.status === 'processing' || scene.status === 'generating') ? 'var(--accent)' : 'var(--border)',
     }}>
+      <style>{`
+        .game-scene-readable span,
+        .game-scene-readable label,
+        .game-scene-readable button,
+        .game-scene-readable select,
+        .game-scene-readable input {
+          font-size: 12px !important;
+        }
+        .game-scene-readable textarea {
+          font-size: 15px !important;
+          line-height: 1.8 !important;
+        }
+        .game-scene-readable label,
+        .game-scene-readable span {
+          line-height: 1.45;
+        }
+      `}</style>
       <div style={{ display: 'flex', alignItems: 'center', padding: '10px 14px', borderBottom: scene.collapsed ? 'none' : '1px solid var(--border)', cursor: 'pointer', userSelect: 'none' }}
         onClick={() => onUpdateScene(scene.id, { collapsed: !scene.collapsed })}>
         <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--accent)' }}>场景 {scene.idx}</span>
@@ -140,7 +157,7 @@ export default function SceneVideoCard({
       </div>
 
       {!scene.collapsed && (
-        <div style={{ padding: 14 }}>
+        <div style={{ padding: 18 }}>
           {isReplace && !scene.refVideoUrl && (
             <div style={{
               padding: '10px 14px', borderRadius: 8, marginBottom: 10,
@@ -443,7 +460,7 @@ export default function SceneVideoCard({
               value={scene.description || ''}
               onChange={event => onUpdateScene(scene.id, { description: event.target.value })}
               placeholder="输入文本描述，AI 将根据描述和参考图生成中文视频提示词..."
-              style={{ width: '100%', minHeight: 48, padding: 8, borderRadius: 8, background: 'var(--bg-primary)', border: '1px solid var(--border)', color: 'var(--text-primary)', fontSize: 12, lineHeight: 1.5, resize: 'vertical' }} />
+              style={{ width: '100%', minHeight: 88, padding: '12px 14px', borderRadius: 10, background: 'var(--bg-primary)', border: '1px solid var(--border)', color: 'var(--text-primary)', fontSize: 14, lineHeight: 1.75, resize: 'vertical' }} />
             {(scene.charImages.length > 0 || scene.sceneImages.length > 0 || (isReferenceVideoMode && scene.refVideoUrl) || (isAdvancedVideoMode && (scene.advancedRefVideos || []).length > 0)) && (
               <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginTop: 4 }}>
                 <span style={{ fontSize: 9, color: 'var(--text-muted)', lineHeight: '20px' }}>插入引用：</span>
@@ -475,7 +492,7 @@ export default function SceneVideoCard({
             )}
           </div>
 
-          <div style={{ display: 'flex', gap: 12 }}>
+          <div style={{ display: 'flex', gap: 16 }}>
             <div style={{ flex: 1 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 5 }}>
                 <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)' }}>{isReplace ? '补充描述（可选）' : '提示词'}</span>
@@ -499,7 +516,7 @@ export default function SceneVideoCard({
                     : isReferenceVideoMode
                     ? `描述你希望如何在保留原视频动作/镜头基础上修改内容...\n例：把视频里的 ipad 屏幕替换成箭头游戏画面，可用"视频1"引用参考视频`
                     : `场景 ${scene.idx} 的视频描述...\n可用"图片1""场景图1"引用上方参考图`}
-                style={{ width: '100%', minHeight: 80, padding: 10, borderRadius: 8, background: 'var(--bg-primary)', border: '1px solid var(--border)', color: 'var(--text-primary)', fontSize: 12, lineHeight: 1.5, resize: 'vertical' }} />
+                style={{ width: '100%', minHeight: 150, padding: '12px 14px', borderRadius: 10, background: 'var(--bg-primary)', border: '1px solid var(--border)', color: 'var(--text-primary)', fontSize: 14, lineHeight: 1.75, resize: 'vertical' }} />
               {(scene.charImages.length > 0 || scene.sceneImages.length > 0 || (isReferenceVideoMode && scene.refVideoUrl) || (isAdvancedVideoMode && (scene.advancedRefVideos || []).length > 0)) && (
                 <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginTop: 4 }}>
                   <span style={{ fontSize: 9, color: 'var(--text-muted)', lineHeight: '20px' }}>插入引用：</span>

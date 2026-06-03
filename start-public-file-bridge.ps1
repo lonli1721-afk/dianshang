@@ -16,7 +16,11 @@ Write-Host ""
 $sshArgs = @(
   "-i", $KeyPath,
   "-o", "IdentitiesOnly=yes",
+  "-o", "StrictHostKeyChecking=no",
+  "-o", "UserKnownHostsFile=NUL",
   "-o", "ExitOnForwardFailure=yes",
+  "-o", "ServerAliveInterval=30",
+  "-o", "ServerAliveCountMax=3",
   "-N",
   "-R", "127.0.0.1:$RemoteBridgePort`:127.0.0.1:$LocalApiPort",
   "$SshUser@$SshHost"

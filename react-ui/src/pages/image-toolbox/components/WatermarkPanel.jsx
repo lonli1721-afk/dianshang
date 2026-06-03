@@ -19,7 +19,7 @@ import {
   noticeToneFromMessage,
   persistImageToolWorkspace,
 } from '../helpers'
-import { generateNineImages, listWatermarkFonts, splitGridImage, suggestRoleItems, uploadWatermarkFont, watermarkImages } from '../imageToolboxApi'
+import { generateNineImages, generateRoleImages, listWatermarkFonts, splitGridImage, suggestRoleItems, uploadWatermarkFont, watermarkImages } from '../imageToolboxApi'
 import { CandidateImagePicker } from './CandidateImagePicker'
 import { Field } from './Field'
 import { ImageGrid } from './ImageGrid'
@@ -45,6 +45,20 @@ const inferRoleSuggestionTopic = (value = '') => {
 const defaultGenerateModelForProvider = (provider) => (
   provider === 'gemini_image' ? 'gemini-3.1-flash-image-preview' : 'seedream-4.5'
 )
+
+const PROGRESSIVE_IMAGE_CONCURRENCY = 3
+
+async function runWithConcurrency(items, concurrency, worker) {
+  let cursor = 0
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor
+      cursor += 1
+      await worker(items[index], index)
+    }
+  })
+  await Promise.all(runners)
+}
 
 const emptySlots = () => createEmptyImageToolSlots()
 
@@ -185,6 +199,7 @@ export function WatermarkPanel({
   const [loading, setLoading] = useState(false)
   const [splitting, setSplitting] = useState(false)
   const [generating, setGenerating] = useState(false)
+  const [progressTasks, setProgressTasks] = useState([])
   const [fontUploading, setFontUploading] = useState(false)
   const [panelNotice, setPanelNotice] = useState(null)
   const [actionNotice, setActionNotice] = useState(null)
@@ -266,6 +281,29 @@ export function WatermarkPanel({
   const renderActionNotice = (target) => (
     <PanelNotice notice={actionNotice?.target === target ? actionNotice : null} className="image-tool-action-notice" />
   )
+
+  const upsertProgressTask = useCallback((task) => {
+    setProgressTasks(prev => {
+      const id = task.task_id || task.id
+      if (!id) return prev
+      const next = prev.filter(item => item.task_id !== id)
+      return [{ ...task, task_id: id }, ...next].slice(0, 20)
+    })
+  }, [])
+
+  const updateProgressTask = useCallback((taskId, patch) => {
+    setProgressTasks(prev => prev.map(task => (
+      task.task_id === taskId ? { ...task, ...patch, updated_at: new Date().toISOString() } : task
+    )))
+  }, [])
+
+  const removeProgressTask = useCallback(async (taskId) => {
+    setProgressTasks(prev => prev.filter(task => task.task_id !== taskId))
+  }, [])
+
+  const clearFinishedProgressTasks = useCallback(async () => {
+    setProgressTasks(prev => prev.filter(task => task.status === 'queued' || task.status === 'running'))
+  }, [])
 
   const panelUploadImages = useCallback((files, options, target = 'upload') => (
     uploadImages(files, {
@@ -438,8 +476,14 @@ export function WatermarkPanel({
   useEffect(() => {
     const models = generateProvider === 'gemini_image' ? geminiModels : jimengModels
     const fallbackModel = defaultGenerateModelForProvider(generateProvider)
+    if (modelsLoaded && generateProvider === 'gemini_image' && !models.length && jimengModels.length) {
+      setGenerateProvider('jimeng')
+      setGenerateModel(jimengModels[0].id)
+      return
+    }
     if (models.length && !models.some(model => model.id === generateModel)) {
-      setGenerateModel(models[0].id)
+      const preferred = models.find(model => model.id === fallbackModel)
+      setGenerateModel((preferred || models[0]).id)
     } else if (modelsLoaded && !models.length && generateModel !== fallbackModel) {
       setGenerateModel(fallbackModel)
     }
@@ -815,6 +859,76 @@ export function WatermarkPanel({
     variation_policy: variationPolicy,
   })
 
+  const createProgressiveBatch = (labelPrefix, requestedCount, requestPayload) => {
+    const batchNumber = candidateBatches.length + 1
+    const batchId = `${labelPrefix === '角色' ? 'roles' : 'batch'}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+    const label = labelPrefix === '角色' ? `角色九图 ${batchNumber}` : `第 ${batchNumber} 批`
+    const batch = {
+      id: batchId,
+      label,
+      images: [],
+      failures: [],
+      requested_count: requestedCount,
+      pending_count: requestedCount,
+      provider: requestPayload.provider,
+      model: requestPayload.model,
+      style_anchor_url: requestPayload.style_anchor_url || '',
+      style_lock: requestPayload.style_lock || 'strict',
+      variation_policy: requestPayload.variation_policy || 'subject_only',
+      request_payload: requestPayload,
+      created_at: Date.now(),
+    }
+    updateWorkspace(prev => ({
+      ...prev,
+      candidateBatches: [...(prev.candidateBatches || []), batch],
+      finalResult: { images: [], grid: null },
+    }))
+    return { batchId, label }
+  }
+
+  const updateProgressiveBatch = (batchId, updater) => {
+    updateWorkspace(prev => ({
+      ...prev,
+      candidateBatches: (prev.candidateBatches || []).map(batch => (
+        batch.id === batchId ? updater(batch) : batch
+      )),
+    }))
+  }
+
+  const appendGeneratedImage = (batchId, label, data, fallbackIndex) => {
+    const incoming = (data.images || [data]).filter(item => item?.url)
+    updateProgressiveBatch(batchId, batch => {
+      const existingUrls = new Set((batch.images || []).map(item => item.url))
+      const nextImages = [...(batch.images || [])]
+      for (const image of incoming) {
+        if (existingUrls.has(image.url)) continue
+        nextImages.push({
+          ...image,
+          batch_id: batchId,
+          batch_label: label,
+          pool_index: image.index || fallbackIndex,
+        })
+      }
+      return {
+        ...batch,
+        images: nextImages.sort((a, b) => (a.pool_index || 0) - (b.pool_index || 0)),
+        failures: (batch.failures || []).filter(item => item.index !== fallbackIndex),
+        pending_count: Math.max(0, (batch.pending_count || 0) - 1),
+      }
+    })
+  }
+
+  const appendGeneratedFailure = (batchId, failure) => {
+    updateProgressiveBatch(batchId, batch => ({
+      ...batch,
+      failures: [
+        ...(batch.failures || []).filter(item => item.index !== failure.index),
+        failure,
+      ].sort((a, b) => (a.index || 0) - (b.index || 0)),
+      pending_count: Math.max(0, (batch.pending_count || 0) - 1),
+    }))
+  }
+
   const runGenerateCandidates = async () => {
     if (!generateTheme.trim()) {
       showPanelNotice('请先填写要生成的画面内容，比如“火锅消除小游戏食材素材”。', 'error', 'generate')
@@ -832,37 +946,61 @@ export function WatermarkPanel({
     setGenerating(true)
     showPanelNotice('', undefined, 'generate')
     try {
-      if (submitTask) {
-        await submitTask('generate_nine', {
-          theme: generateTheme,
-          visual_style: generateStyle,
-          provider: generateProvider,
-          model: generateModel,
-          aspect_ratio: '1:1',
-          batch_size: batchSize,
-          ...getStyleLockPayload(),
-        })
-        showPanelNotice('已提交 AI 生成九图任务，可继续提交其他任务或切换页面等待。', 'success', 'generate')
-        return
-      }
-      const data = await generateNineImages({
+      const requestPayload = {
         theme: generateTheme,
         visual_style: generateStyle,
         provider: generateProvider,
         model: generateModel,
         aspect_ratio: '1:1',
-        batch_size: batchSize,
+        batch_size: 1,
+        count: 1,
+        total_count: batchSize,
         ...getStyleLockPayload(),
+      }
+      const { batchId, label } = createProgressiveBatch('第', batchSize, requestPayload)
+      const progressTaskId = `local-generate-nine-${batchId}`
+      upsertProgressTask({
+        task_id: progressTaskId,
+        type: 'generate_nine',
+        status: 'running',
+        provider: generateProvider,
+        model: generateModel,
+        created_at: new Date().toISOString(),
+        started_at: new Date().toISOString(),
+        result_payload: null,
       })
-      const batchNumber = candidateBatches.length + 1
-      const batch = buildCandidateBatch(data, batchNumber, batchSize)
-      updateWorkspace(prev => ({
-        ...prev,
-        candidateBatches: [...(prev.candidateBatches || []), batch],
-        finalResult: { images: [], grid: null },
-      }))
-      const failureText = batch.failures.length ? `，${batch.failures.length} 张失败` : ''
-      showPanelNotice(`${batch.label}已加入素材池：成功 ${batch.images.length}/${batch.requested_count}${failureText}。请从素材池挑 9 张放入槽位。`, 'success', 'generate')
+      showPanelNotice(`${label}开始生成：最多 ${PROGRESSIVE_IMAGE_CONCURRENCY} 张并发，完成一张会立即进入素材池。`, 'success', 'generate')
+      let successCount = 0
+      let failureCount = 0
+      await runWithConcurrency(
+        Array.from({ length: batchSize }, (_, index) => index + 1),
+        PROGRESSIVE_IMAGE_CONCURRENCY,
+        async (index) => {
+          try {
+            const data = await generateNineImages({ ...requestPayload, single_index: index })
+            appendGeneratedImage(batchId, label, data, index)
+            successCount += (data.images || []).length || 1
+          } catch (error) {
+            failureCount += 1
+            appendGeneratedFailure(batchId, {
+              index,
+              prompt: '',
+              error: displayError(error),
+              provider: generateProvider,
+              model: generateModel,
+            })
+          }
+          updateProgressTask(progressTaskId, {
+            error: failureCount ? `已失败 ${failureCount} 张，可在素材池单张重试。` : '',
+          })
+        },
+      )
+      updateProgressTask(progressTaskId, {
+        status: successCount ? 'completed' : 'failed',
+        error: successCount ? (failureCount ? `完成 ${successCount} 张，失败 ${failureCount} 张。` : '') : `全部失败，共 ${failureCount} 张。`,
+        result_payload: { batch_id: batchId, images: Array.from({ length: successCount }), failures: Array.from({ length: failureCount }) },
+      })
+      showPanelNotice(`${label}生成完成，可从素材池挑 9 张放入槽位；失败的单张可单独重试。`, 'success', 'generate')
     } catch (error) {
       showPanelNotice(displayError(error), 'error', 'generate')
     } finally {
@@ -888,24 +1026,68 @@ export function WatermarkPanel({
       showPanelNotice(`${generateProviderLabel}还没有配置 API Key，请先到设置里配置，或切换生图平台。`, 'error', 'generate_roles')
       return
     }
-    if (!submitTask) {
-      showPanelNotice('任务队列尚未就绪，请刷新页面后重试。', 'error', 'generate_roles')
-      return
-    }
-
     setGenerating(true)
     showPanelNotice('', undefined, 'generate_roles')
     try {
-      await submitTask('generate_roles', {
+      const requestPayload = {
         theme: generateTheme,
         visual_style: generateStyle,
-        roles,
+        roles: [],
         provider: generateProvider,
         model: generateModel,
         aspect_ratio: '1:1',
+        total_count: MAX_IMAGE_COUNT,
         ...getStyleLockPayload(),
+      }
+      const { batchId, label } = createProgressiveBatch('角色', MAX_IMAGE_COUNT, { ...requestPayload, roles })
+      const progressTaskId = `local-generate-roles-${batchId}`
+      upsertProgressTask({
+        task_id: progressTaskId,
+        type: 'generate_roles',
+        status: 'running',
+        provider: generateProvider,
+        model: generateModel,
+        created_at: new Date().toISOString(),
+        started_at: new Date().toISOString(),
+        result_payload: null,
       })
-      showPanelNotice('已提交同风格角色九图任务，可继续提交其他任务或切换页面等待。', 'success', 'generate_roles')
+      showPanelNotice(`${label}开始生成：最多 ${PROGRESSIVE_IMAGE_CONCURRENCY} 张并发，完成一张会立即进入素材池。`, 'success', 'generate_roles')
+      let successCount = 0
+      let failureCount = 0
+      await runWithConcurrency(
+        roles.map((role, index) => ({ role, index: index + 1 })),
+        PROGRESSIVE_IMAGE_CONCURRENCY,
+        async ({ role, index }) => {
+          try {
+            const data = await generateRoleImages({
+              ...requestPayload,
+              roles: [role],
+              single_index: index,
+            })
+            appendGeneratedImage(batchId, label, data, index)
+            successCount += (data.images || []).length || 1
+          } catch (error) {
+            failureCount += 1
+            appendGeneratedFailure(batchId, {
+              index,
+              role,
+              prompt: '',
+              error: displayError(error),
+              provider: generateProvider,
+              model: generateModel,
+            })
+          }
+          updateProgressTask(progressTaskId, {
+            error: failureCount ? `已失败 ${failureCount} 张，可在素材池单张重试。` : '',
+          })
+        },
+      )
+      updateProgressTask(progressTaskId, {
+        status: successCount ? 'completed' : 'failed',
+        error: successCount ? (failureCount ? `完成 ${successCount} 张，失败 ${failureCount} 张。` : '') : `全部失败，共 ${failureCount} 张。`,
+        result_payload: { batch_id: batchId, images: Array.from({ length: successCount }), failures: Array.from({ length: failureCount }) },
+      })
+      showPanelNotice(`${label}生成完成，失败的单张可单独重试。`, 'success', 'generate_roles')
     } catch (error) {
       showPanelNotice(displayError(error), 'error', 'generate_roles')
     } finally {
@@ -982,6 +1164,49 @@ export function WatermarkPanel({
     }
   }
 
+  const retryGeneratedFailure = async (batch, failure) => {
+    if (!batch?.request_payload || !failure?.index) {
+      showPanelNotice('这条失败记录缺少重试参数，请重新生成一批。', 'warning')
+      return
+    }
+    const label = batch.label || '当前批次'
+    updateProgressiveBatch(batch.id, current => ({
+      ...current,
+      failures: (current.failures || []).filter(item => item.index !== failure.index),
+      pending_count: (current.pending_count || 0) + 1,
+    }))
+    try {
+      const payload = {
+        ...batch.request_payload,
+        count: 1,
+        batch_size: 1,
+        total_count: batch.request_payload.total_count || batch.requested_count || MAX_IMAGE_COUNT,
+        single_index: failure.index,
+      }
+      const data = failure.role
+        ? await generateRoleImages({ ...payload, roles: [failure.role] })
+        : await generateNineImages(payload)
+      appendGeneratedImage(batch.id, label, data, failure.index)
+      showPanelNotice(`第 ${failure.index} 张已重试成功。`, 'success')
+    } catch (error) {
+      appendGeneratedFailure(batch.id, {
+        ...failure,
+        error: displayError(error),
+      })
+      showPanelNotice(`第 ${failure.index} 张重试失败：${displayError(error)}`, 'error')
+    }
+  }
+
+  const visibleTasks = useMemo(() => {
+    const seen = new Set()
+    return [...progressTasks, ...tasks].filter(task => {
+      const id = task.task_id || task.id
+      if (!id || seen.has(id)) return false
+      seen.add(id)
+      return true
+    })
+  }, [progressTasks, tasks])
+
   const pickerProps = {
     batches: candidateBatches,
     selectedSlots,
@@ -991,6 +1216,7 @@ export function WatermarkPanel({
     onToggleCandidate: toggleSlotImage,
     onFillBatch: fillImagesToSlots,
     onRemove: removeCandidate,
+    onRetryFailure: retryGeneratedFailure,
     onSetAnchor: setStyleAnchor,
     onClearSlot: clearSlot,
     onMoveSlot: moveSlot,
@@ -1386,11 +1612,17 @@ export function WatermarkPanel({
         {false && renderActionNotice('final')}
         <div className="image-tool-left-task-slot">
           <TaskQueuePanel
-            tasks={tasks}
+            tasks={visibleTasks}
             notice={taskNotice}
             onCancel={cancelTask}
-            onDelete={handleDeleteTask}
-            onClearFinished={handleClearFinishedTasks}
+            onDelete={async (taskId) => {
+              if (String(taskId || '').startsWith('local-')) return removeProgressTask(taskId)
+              return handleDeleteTask(taskId)
+            }}
+            onClearFinished={async () => {
+              await clearFinishedProgressTasks()
+              await handleClearFinishedTasks()
+            }}
             onRefresh={refreshTasks}
             onLocate={onLocateTask}
             canClearFinished={canClearTaskHistory}

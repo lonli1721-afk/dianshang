@@ -53,10 +53,51 @@ const hideTemporarilyUnavailablePromptModels = (models = []) => (
 )
 const FALLBACK_MODELS = [
   { id: 'doubao-seed-2-0-pro-260215', name: '火山 Doubao Seed 2.0 Pro', provider: 'ark' },
+  { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash（实验）', provider: 'gemini' },
   { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', provider: 'gemini' },
   { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'gemini' },
   { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', provider: 'gemini' },
 ]
+const VIRAL_WORKBENCH_READABLE_STYLE = `
+  .viral-readable {
+    font-size: 14px;
+  }
+  .viral-readable .viral-button,
+  .viral-readable input,
+  .viral-readable select,
+  .viral-readable textarea,
+  .viral-readable label,
+  .viral-readable .viral-field,
+  .viral-readable .viral-empty,
+  .viral-readable .viral-alert,
+  .viral-readable .viral-material-row-copy,
+  .viral-readable .viral-history-copy,
+  .viral-readable .viral-tag-details,
+  .viral-readable .viral-script-card,
+  .viral-readable .viral-rec-list,
+  .viral-readable .viral-mini-metric,
+  .viral-readable .viral-scene-apply,
+  .viral-readable .viral-scene-action-help,
+  .viral-readable .viral-condition-help {
+    font-size: 13px !important;
+    line-height: 1.55 !important;
+  }
+  .viral-readable textarea {
+    font-size: 14px !important;
+    line-height: 1.75 !important;
+  }
+  .viral-readable .viral-panel-heading p,
+  .viral-readable .viral-creative-section-head p,
+  .viral-readable .viral-material-diagnosis,
+  .viral-readable .viral-tag-meta,
+  .viral-readable .viral-script-card-badges,
+  .viral-readable .viral-upload-job,
+  .viral-readable .viral-muted,
+  .viral-readable small {
+    font-size: 12px !important;
+    line-height: 1.5 !important;
+  }
+`
 
 function formatDate(value) {
   if (!value) return ''
@@ -1725,7 +1766,9 @@ export default function ViralWorkbenchPage() {
   }
 
   return (
-    <div className="viral-page viral-creative-page">
+    <>
+    <style>{VIRAL_WORKBENCH_READABLE_STYLE}</style>
+    <div className="viral-page viral-creative-page viral-readable">
       <div className="viral-shell viral-creative-shell">
         <ViralWorkbenchHeader
           mainSummary={mainSummary}
@@ -2446,5 +2489,6 @@ export default function ViralWorkbenchPage() {
         </main>
       </div>
     </div>
+    </>
   )
 }

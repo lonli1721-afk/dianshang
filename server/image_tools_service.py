@@ -70,6 +70,8 @@ class GenerateNineRequest(BaseModel):
     style_lock: str = "strict"
     style_lock_options: list[str] = Field(default_factory=list)
     variation_policy: str = "subject_only"
+    single_index: int | None = Field(default=None, ge=1, le=12)
+    total_count: int | None = Field(default=None, ge=1, le=12)
 
 
 class GenerateRolesRequest(BaseModel):
@@ -85,6 +87,8 @@ class GenerateRolesRequest(BaseModel):
     style_lock: str = "strict"
     style_lock_options: list[str] = Field(default_factory=list)
     variation_policy: str = "subject_only"
+    single_index: int | None = Field(default=None, ge=1, le=9)
+    total_count: int | None = Field(default=None, ge=1, le=9)
 
 
 class DeriveRequest(BaseModel):
@@ -313,6 +317,8 @@ def prepare_generate_nine_request(req: GenerateNineRequest) -> GenerateNineReque
         "style_lock": style_lock,
         "style_lock_options": style_lock_options,
         "variation_policy": variation_policy,
+        "single_index": req.single_index,
+        "total_count": req.total_count,
     })
 
 
@@ -321,7 +327,7 @@ def prepare_generate_roles_request(req: GenerateRolesRequest) -> GenerateRolesRe
     if not theme:
         raise HTTPException(400, "请填写同风格角色九图主题。")
     roles = [str(item or "").strip() for item in req.roles or [] if str(item or "").strip()]
-    if len(roles) != 9:
+    if len(roles) != 9 and not (req.single_index and len(roles) == 1):
         raise HTTPException(400, "同风格角色九图需要填写 9 个角色或物品名。")
     provider = req.provider if req.provider in {"jimeng", "gemini_image"} else "jimeng"
     model = (req.model or "").strip()
@@ -350,6 +356,8 @@ def prepare_generate_roles_request(req: GenerateRolesRequest) -> GenerateRolesRe
         "style_lock": style_lock,
         "style_lock_options": style_lock_options,
         "variation_policy": variation_policy,
+        "single_index": req.single_index,
+        "total_count": req.total_count,
     })
 
 
@@ -1126,7 +1134,7 @@ def _style_contract_prompt(req: GenerateNineRequest, index: int) -> str:
         f"{variation_rule}\n"
         "禁止项：禁止出现任何文字、标题、水印、logo、边框、拼贴分割线、对比图、UI、手写标注；"
         "禁止背景漂移、色调漂移、镜头变化、线条粗细变化、主体比例忽大忽小；"
-        f"这是候选素材批次中的第 {index}/{req.count or req.batch_size} 张。"
+        f"这是候选素材批次中的第 {index}/{req.total_count or req.count or req.batch_size} 张。"
     )
 
 
@@ -1223,6 +1231,7 @@ async def generate_nine_images(req: GenerateNineRequest) -> dict:
 
     batch_id = f"batch_{uuid.uuid4().hex[:12]}"
     requested_count = req.count or req.batch_size
+    indices = [req.single_index] if req.single_index else list(range(1, requested_count + 1))
     try:
         reference_context = await _generate_reference_context(req)
     except Exception as exc:
@@ -1241,7 +1250,7 @@ async def generate_nine_images(req: GenerateNineRequest) -> dict:
                 logger.warning("Generate nine image failed index=%s: %s", index, exc)
                 return {"ok": False, "batch_id": batch_id, "index": index, "prompt": prompt, "error": str(exc)[:500]}
 
-    results = await asyncio.gather(*[_worker(index) for index in range(1, requested_count + 1)])
+    results = await asyncio.gather(*[_worker(index) for index in indices])
     images = [
         {key: value for key, value in item.items() if key != "ok"}
         for item in results
@@ -1295,7 +1304,7 @@ def _role_image_prompt(req: GenerateRolesRequest, role_name: str, index: int) ->
         f"{variation_rule}\n"
         "禁止项：禁止出现任何文字、标题、水印、logo、边框、拼贴分割线、对比图、UI、手写标注；"
         "禁止背景漂移、色调漂移、镜头变化、线条粗细变化、主体比例忽大忽小；"
-        f"这是同风格角色九图中的第 {index}/9 张。"
+        f"这是同风格角色九图中的第 {index}/{req.total_count or 9} 张。"
     )
 
 
@@ -1331,9 +1340,13 @@ async def generate_role_images(req: GenerateRolesRequest) -> dict:
                     "error": str(exc)[:500],
                 }
 
+    role_entries = [
+        (req.single_index or index, role_name)
+        for index, role_name in enumerate(req.roles, start=1)
+    ]
     results = await asyncio.gather(*[
         _worker(index, role_name)
-        for index, role_name in enumerate(req.roles, start=1)
+        for index, role_name in role_entries
     ])
     images = [
         {key: value for key, value in item.items() if key != "ok"}
@@ -1982,6 +1995,90 @@ def recover_interrupted_image_tool_tasks() -> int:
     return db.mark_stale_image_tool_tasks_interrupted()
 
 
+IMAGE_TOOL_PRICE_CONFIG_ENV = "IMAGE_TOOL_MODEL_PRICE_CNY"
+IMAGE_TOOL_LOCAL_TASK_TYPES = {"watermark"}
+
+
+@lru_cache(maxsize=1)
+def _image_tool_price_config() -> dict[str, float]:
+    raw = (os.environ.get(IMAGE_TOOL_PRICE_CONFIG_ENV) or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Invalid %s JSON, image tool costs will be marked unpriced.", IMAGE_TOOL_PRICE_CONFIG_ENV)
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    prices: dict[str, float] = {}
+    for key, value in parsed.items():
+        try:
+            prices[str(key).strip()] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return prices
+
+
+def _lookup_image_tool_unit_price(task_type: str, provider: str, model: str) -> float | None:
+    config = _image_tool_price_config()
+    candidates = [
+        f"{task_type}:{provider}:{model}",
+        f"{provider}:{model}",
+        f"{task_type}:{provider}:*",
+        f"{provider}:*",
+        f"{task_type}:*",
+        "*",
+    ]
+    for key in candidates:
+        if key in config:
+            return config[key]
+    return None
+
+
+def _count_image_tool_outputs(task_type: str, result: dict) -> int:
+    if task_type == "reverse_prompts" or not isinstance(result, dict):
+        return 0
+    count = 0
+    images = result.get("images")
+    if isinstance(images, list):
+        count += len([item for item in images if isinstance(item, dict) and item.get("url")])
+    if result.get("image_url"):
+        count += 1
+    grid = result.get("grid")
+    if isinstance(grid, dict) and grid.get("url"):
+        count += 1
+    return count
+
+
+def _image_tool_billing_snapshot(task_type: str, provider: str, model: str, result: dict) -> dict:
+    count = _count_image_tool_outputs(task_type, result)
+    if task_type in IMAGE_TOOL_LOCAL_TASK_TYPES:
+        return {
+            "billable_image_count": count,
+            "estimated_cost_cny": 0,
+            "billing_status": "local",
+        }
+    if count <= 0:
+        return {
+            "billable_image_count": 0,
+            "estimated_cost_cny": 0,
+            "billing_status": "not_billable",
+        }
+    unit_price = _lookup_image_tool_unit_price(task_type, provider, model)
+    if unit_price is None:
+        return {
+            "billable_image_count": count,
+            "estimated_cost_cny": 0,
+            "billing_status": "unpriced",
+        }
+    return {
+        "billable_image_count": count,
+        "estimated_cost_cny": round(count * unit_price, 4),
+        "billing_status": "estimated",
+    }
+
+
 def _image_tool_task_response(task: dict | None) -> dict:
     if not task:
         raise HTTPException(404, "图片工具任务不存在。")
@@ -1996,6 +2093,9 @@ def _image_tool_task_response(task: dict | None) -> dict:
         "result_payload": task.get("result_payload") or {},
         "error": task.get("error", ""),
         "progress": task.get("progress", 0),
+        "billable_image_count": int(task.get("billable_image_count") or 0),
+        "estimated_cost_cny": float(task.get("estimated_cost_cny") or 0),
+        "billing_status": task.get("billing_status", ""),
         "created_at": task.get("created_at", ""),
         "updated_at": task.get("updated_at", ""),
     }
@@ -2151,6 +2251,12 @@ async def _run_image_tool_task(task_id: str) -> None:
     await asyncio.to_thread(db.update_image_tool_task, task_id, status="running", progress=0.05)
     try:
         result = await _execute_image_tool_task(task.get("type", ""), task.get("input_payload") or {})
+        billing_snapshot = _image_tool_billing_snapshot(
+            task.get("type", ""),
+            task.get("provider", ""),
+            task.get("model", ""),
+            result,
+        )
         latest = await asyncio.to_thread(db.get_image_tool_task, task_id)
         if latest and latest.get("status") == "canceled":
             return
@@ -2161,6 +2267,7 @@ async def _run_image_tool_task(task_id: str) -> None:
             result_payload=result,
             error="",
             progress=1,
+            **billing_snapshot,
         )
     except asyncio.CancelledError:
         latest = await asyncio.to_thread(db.get_image_tool_task, task_id)
@@ -2182,4 +2289,7 @@ async def _run_image_tool_task(task_id: str) -> None:
             result_payload={},
             error=_friendly_image_tool_error(exc, feature_name="图片工具任务"),
             progress=1,
+            billable_image_count=0,
+            estimated_cost_cny=0,
+            billing_status="failed",
         )

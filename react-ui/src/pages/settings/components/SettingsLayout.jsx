@@ -40,7 +40,7 @@ export default function SettingsLayout({
       </div>
 
       <div style={{ flex: 1, overflow: 'auto', padding: 24 }}>
-        <div style={{ maxWidth: 660 }}>
+        <div style={{ maxWidth: activeNav === 'usage' ? 1080 : 660 }}>
           {children}
         </div>
       </div>

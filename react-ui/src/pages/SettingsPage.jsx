@@ -1268,7 +1268,8 @@ function UsagePanel({ isAdmin }) {
     estimated_video_cost_cny: 0,
     storage_bytes: 0,
   })
-
+  const dailyRows = Array.isArray(usage?.daily) ? usage.daily : []
+  const dailyGridColumns = '1.25fr repeat(7, 0.75fr) 1fr 1fr'
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
@@ -1279,18 +1280,18 @@ function UsagePanel({ isAdmin }) {
         </button>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 10, marginBottom: 14 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(190px, 1.5fr) minmax(190px, 1.5fr) minmax(170px, 1.15fr) minmax(180px, 1.2fr) minmax(120px, 0.8fr)', gap: 10, marginBottom: 14 }}>
         <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>开始日期</div>
-          <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} style={{ width: '100%', fontSize: 12 }} />
+          <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} style={{ width: '100%', minWidth: 0, fontSize: 12, paddingLeft: 8, paddingRight: 4 }} />
         </div>
         <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>结束日期</div>
-          <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} style={{ width: '100%', fontSize: 12 }} />
+          <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} style={{ width: '100%', minWidth: 0, fontSize: 12, paddingLeft: 8, paddingRight: 4 }} />
         </div>
         <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>部门</div>
-          <select value={selectedDepartment} onChange={(e) => { setSelectedDepartment(e.target.value); setSelectedGroup('') }} style={{ width: '100%', fontSize: 12 }}>
+          <select value={selectedDepartment} onChange={(e) => { setSelectedDepartment(e.target.value); setSelectedGroup('') }} style={{ width: '100%', minWidth: 0, fontSize: 12 }}>
             <option value="">全部部门</option>
             {departments.map((item) => (
               <option key={item.department} value={item.department}>{item.department || '未分部门'}</option>
@@ -1299,7 +1300,7 @@ function UsagePanel({ isAdmin }) {
         </div>
         <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>团队/组</div>
-          <select value={selectedGroup} onChange={(e) => setSelectedGroup(e.target.value)} style={{ width: '100%', fontSize: 12 }}>
+          <select value={selectedGroup} onChange={(e) => setSelectedGroup(e.target.value)} style={{ width: '100%', minWidth: 0, fontSize: 12 }}>
             <option value="">全部团队</option>
             {groupOptions
               .filter((item) => !selectedDepartment || item.department === selectedDepartment)
@@ -1344,6 +1345,57 @@ function UsagePanel({ isAdmin }) {
         ))}
       </div>
 
+      <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden', marginBottom: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '11px 12px', borderBottom: '1px solid var(--border)' }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700 }}>每日用量明细</div>
+            <div style={{ marginTop: 3, fontSize: 11, color: 'var(--text-muted)' }}>
+              先展示所选日期范围内每天的数据，最后一行为该时间段汇总。
+            </div>
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+            {startDate} 至 {endDate}
+          </div>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: dailyGridColumns, gap: 8, padding: '9px 12px', fontSize: 11, color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', fontWeight: 600 }}>
+          <span>日期</span><span>项目</span><span>任务</span><span>完成</span><span>失败</span><span>图片</span><span>视频</span><span>生成视频</span><span>费用</span><span>存储</span>
+        </div>
+        {loading ? (
+          <div style={{ padding: 18, fontSize: 12, color: 'var(--text-muted)' }}>正在读取每日数据...</div>
+        ) : dailyRows.length === 0 ? (
+          <div style={{ padding: 18, fontSize: 12, color: 'var(--text-muted)' }}>暂无每日数据</div>
+        ) : (
+          <>
+            {dailyRows.map((day) => (
+              <div key={day.date} style={{ display: 'grid', gridTemplateColumns: dailyGridColumns, gap: 8, padding: '10px 12px', fontSize: 12, borderTop: '1px solid var(--border)', alignItems: 'center' }}>
+                <span style={{ fontWeight: 600 }}>{day.date}</span>
+                <span>{day.project_count || 0}</span>
+                <span>{day.task_count || 0}</span>
+                <span>{day.completed_task_count || 0}</span>
+                <span>{day.failed_task_count || 0}</span>
+                <span>{day.image_file_count || 0}</span>
+                <span>{day.video_file_count || 0}</span>
+                <span>{day.video_generation_count || 0}</span>
+                <span>{formatCurrency(day.estimated_video_cost_cny)}</span>
+                <span>{formatBytes(day.storage_bytes)}</span>
+              </div>
+            ))}
+            <div style={{ display: 'grid', gridTemplateColumns: dailyGridColumns, gap: 8, padding: '11px 12px', fontSize: 12, borderTop: '1px solid var(--border)', alignItems: 'center', fontWeight: 800, background: 'linear-gradient(90deg, rgba(124,58,237,0.1), rgba(14,165,233,0.08))' }}>
+              <span>区间汇总</span>
+              <span>{totals.project_count || 0}</span>
+              <span>{totals.task_count || 0}</span>
+              <span>{totals.completed_task_count || 0}</span>
+              <span>{totals.failed_task_count || 0}</span>
+              <span>{totals.image_file_count || 0}</span>
+              <span>{totals.video_file_count || 0}</span>
+              <span>{totals.video_generation_count || 0}</span>
+              <span>{formatCurrency(totals.estimated_video_cost_cny)}</span>
+              <span>{formatBytes(totals.storage_bytes)}</span>
+            </div>
+          </>
+        )}
+      </div>
+
       <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 14 }}>
         <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>团队费用占比</div>
         {chartSlices.length === 0 ? (
@@ -1361,7 +1413,7 @@ function UsagePanel({ isAdmin }) {
               {chartSlices.map((slice) => (
                 <div key={slice.label} style={{ display: 'grid', gridTemplateColumns: '14px 1fr auto auto', gap: 8, alignItems: 'center', border: '1px solid var(--border)', borderRadius: 8, padding: '6px 8px' }}>
                   <span style={{ width: 10, height: 10, borderRadius: '50%', background: slice.color }} />
-                  <span title={slice.label} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{slice.label}</span>
+                  <span title={slice.label} style={{ whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.35 }}>{slice.label}</span>
                   <span style={{ fontWeight: 600, color: '#1d4ed8' }}>{slice.pct.toFixed(1)}%</span>
                   <span style={{ color: 'var(--text-secondary)' }}>{formatCurrency(slice.amount)}</span>
                 </div>
@@ -1372,7 +1424,7 @@ function UsagePanel({ isAdmin }) {
       </div>
 
       <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr 1fr repeat(8, 0.65fr) 0.8fr', gap: 8, padding: '9px 12px', fontSize: 11, color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', fontWeight: 600 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1.3fr 1.45fr repeat(8, 0.58fr) 0.78fr', gap: 8, padding: '9px 12px', fontSize: 11, color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', fontWeight: 600 }}>
           <span>用户</span><span>部门</span><span>团队/组</span><span>项目</span><span>任务</span><span>完成</span><span>失败</span><span>图片</span><span>视频</span><span>生成视频</span><span>费用</span><span>存储</span>
         </div>
         {loading ? (
@@ -1380,19 +1432,19 @@ function UsagePanel({ isAdmin }) {
         ) : users.length === 0 ? (
           <div style={{ padding: 18, fontSize: 12, color: 'var(--text-muted)' }}>暂无数据</div>
         ) : users.map(user => (
-          <div key={user.id} style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr 1fr repeat(8, 0.65fr) 0.8fr', gap: 8, padding: '10px 12px', fontSize: 12, borderTop: '1px solid var(--border)', alignItems: 'center' }}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <div key={user.id} style={{ display: 'grid', gridTemplateColumns: '1.3fr 1.3fr 1.45fr repeat(8, 0.58fr) 0.78fr', gap: 8, padding: '10px 12px', fontSize: 12, borderTop: '1px solid var(--border)', alignItems: 'center' }}>
+            <div style={{ minWidth: 0, whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.35 }}>
+              <div>
                 {user.display_name || user.username}
               </div>
               {user.username && user.display_name && user.display_name !== user.username && (
-                <div style={{ marginTop: 2, fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <div style={{ marginTop: 2, fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'normal', wordBreak: 'break-word' }}>
                   {user.username}
                 </div>
               )}
             </div>
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{user.department || '未分部门'}</span>
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{user.team_group || user.team || '未分团队'}</span>
+            <span style={{ whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.35 }}>{user.department || '未分部门'}</span>
+            <span style={{ whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.35 }}>{user.team_group || user.team || '未分团队'}</span>
             <span>{user.project_count || 0}</span>
             <span>{user.task_count || 0}</span>
             <span>{user.completed_task_count || 0}</span>
@@ -1405,7 +1457,7 @@ function UsagePanel({ isAdmin }) {
           </div>
         ))}
         {!loading && users.length > 0 && (
-          <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr 1fr repeat(8, 0.65fr) 0.8fr', gap: 8, padding: '10px 12px', fontSize: 12, borderTop: '1px solid var(--border)', alignItems: 'center', fontWeight: 700, background: 'var(--bg-primary)' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1.3fr 1.45fr repeat(8, 0.58fr) 0.78fr', gap: 8, padding: '10px 12px', fontSize: 12, borderTop: '1px solid var(--border)', alignItems: 'center', fontWeight: 700, background: 'var(--bg-primary)' }}>
             <span>总计（{users.length} 人）</span>
             <span>-</span>
             <span>-</span>

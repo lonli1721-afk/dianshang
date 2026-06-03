@@ -4,6 +4,7 @@ import { DERIVE_MODELS_BY_PROVIDER, IMAGE_TOOL_TABS, PAID_FEATURE_NOTICE } from 
 import { DerivePanel } from './image-toolbox/components/DerivePanel'
 import { PanelNotice } from './image-toolbox/components/PanelNotice'
 import { ReversePromptPanel } from './image-toolbox/components/ReversePromptPanel'
+import { StandaloneImagePanel } from './image-toolbox/components/StandaloneImagePanel'
 import { ToastStack } from './image-toolbox/components/ToastStack'
 import { ToolTabs } from './image-toolbox/components/ToolTabs'
 import { WatermarkPanel } from './image-toolbox/components/WatermarkPanel'
@@ -14,8 +15,49 @@ import { useImageUploadQueue } from './image-toolbox/useImageUploadQueue'
 
 const tabForTask = (type) => (type === 'derive' ? 'derive' : type === 'reverse_prompts' ? 'reverse' : 'watermark')
 
+const IMAGE_TOOLBOX_READABLE_STYLE = `
+  .image-tool-readable {
+    font-size: 14px;
+  }
+  .image-tool-readable button,
+  .image-tool-readable input,
+  .image-tool-readable select,
+  .image-tool-readable textarea,
+  .image-tool-readable label,
+  .image-tool-readable .image-tool-tab,
+  .image-tool-readable .image-tool-mode-card,
+  .image-tool-readable .image-tool-task-card,
+  .image-tool-readable .image-tool-task-pill,
+  .image-tool-readable .image-tool-field,
+  .image-tool-readable .image-tool-empty,
+  .image-tool-readable .image-tool-alert,
+  .image-tool-readable .image-tool-badge,
+  .image-tool-readable .image-tool-secondary,
+  .image-tool-readable .image-tool-primary,
+  .image-tool-readable .image-tool-setting-summary,
+  .image-tool-readable .image-tool-thumb-meta,
+  .image-tool-readable .image-tool-result-actions,
+  .image-tool-readable .image-tool-prompt-box,
+  .image-tool-readable .image-tool-assist-panel {
+    font-size: 13px !important;
+    line-height: 1.55 !important;
+  }
+  .image-tool-readable textarea {
+    font-size: 14px !important;
+    line-height: 1.75 !important;
+  }
+  .image-tool-readable small,
+  .image-tool-readable .image-tool-tab-status,
+  .image-tool-readable .image-tool-task-foot,
+  .image-tool-readable .image-tool-inline-warning,
+  .image-tool-readable .image-tool-muted {
+    font-size: 12px !important;
+    line-height: 1.5 !important;
+  }
+`
+
 export default function ImageToolboxPage() {
-  const [activeTab, setActiveTab] = useState('watermark')
+  const [activeTab, setActiveTab] = useState('standalone')
   const [locateRequest, setLocateRequest] = useState(null)
   const { globalNotice, taskNotice, toasts, notify, taskNotify, uploadNotify, dismissToast, clearGlobalNotice } = useImageToolNotifications()
   const { imageModels, modelsLoaded } = useImageToolboxModels()
@@ -35,7 +77,9 @@ export default function ImageToolboxPage() {
   const sharedPanelProps = { uploadImages, notify, ...taskProps, locateRequest, onLocateTask: locateTask }
 
   return (
-    <div className="image-toolbox">
+    <>
+    <style>{IMAGE_TOOLBOX_READABLE_STYLE}</style>
+    <div className="image-toolbox image-tool-readable">
       <header className="image-tool-header">
         <div>
           <h1>图片工具箱</h1>
@@ -66,6 +110,13 @@ export default function ImageToolboxPage() {
               {...sharedPanelProps}
             />
           )}
+          {activeTab === 'standalone' && (
+            <StandaloneImagePanel
+              imageModels={imageModels}
+              modelsLoaded={modelsLoaded}
+              onOpenImage={(url) => window.open(url, '_blank', 'noopener,noreferrer')}
+            />
+          )}
           {activeTab === 'derive' && (
             <DerivePanel {...modelProps} {...sharedPanelProps} />
           )}
@@ -76,5 +127,6 @@ export default function ImageToolboxPage() {
       </div>
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
+    </>
   )
 }

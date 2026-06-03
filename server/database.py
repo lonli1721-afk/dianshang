@@ -100,6 +100,9 @@ def init_db(path: Path | None = None):
                 result_payload TEXT DEFAULT '{}',
                 error TEXT DEFAULT '',
                 progress REAL DEFAULT 0,
+                billable_image_count INTEGER DEFAULT 0,
+                estimated_cost_cny REAL DEFAULT 0,
+                billing_status TEXT DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -243,6 +246,9 @@ def _migration_008_create_image_tool_tasks(conn):
             result_payload TEXT DEFAULT '{}',
             error TEXT DEFAULT '',
             progress REAL DEFAULT 0,
+            billable_image_count INTEGER DEFAULT 0,
+            estimated_cost_cny REAL DEFAULT 0,
+            billing_status TEXT DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -255,6 +261,12 @@ def _migration_008_create_image_tool_tasks(conn):
     """)
 
 
+def _migration_009_add_image_tool_task_billing_snapshot(conn):
+    _add_column(conn, "image_tool_tasks", "billable_image_count INTEGER DEFAULT 0")
+    _add_column(conn, "image_tool_tasks", "estimated_cost_cny REAL DEFAULT 0")
+    _add_column(conn, "image_tool_tasks", "billing_status TEXT DEFAULT ''")
+
+
 _MIGRATIONS: list[tuple[int, str, callable]] = [
     (1, "create game project/task indexes", _migration_001_create_indexes),
     (4, "create game operation events table", _migration_004_create_game_operation_events),
@@ -262,6 +274,7 @@ _MIGRATIONS: list[tuple[int, str, callable]] = [
     (6, "create viral workbench tables", _migration_006_create_viral_workbench),
     (7, "add viral video insights", _migration_007_add_viral_video_insights),
     (8, "create image tool tasks", _migration_008_create_image_tool_tasks),
+    (9, "add image tool task billing snapshot columns", _migration_009_add_image_tool_task_billing_snapshot),
 ]
 
 

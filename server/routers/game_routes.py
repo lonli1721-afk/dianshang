@@ -581,6 +581,27 @@ async def _record_operation_failure(
         logger.exception("Failed to record %s failure event", operation)
 
 
+async def _record_operation_success(
+    operation: str,
+    project_id: str = "",
+    provider: str = "",
+    model: str = "",
+    task_id: str = "",
+) -> None:
+    try:
+        await _db_call(
+            db.create_game_operation_event,
+            project_id=project_id,
+            operation=operation,
+            provider=provider,
+            model=model,
+            status="success",
+            task_id=task_id,
+        )
+    except Exception:
+        logger.exception("Failed to record %s success event", operation)
+
+
 def _is_failed_task_status(status: str) -> bool:
     return is_failed_task_status(status)
 
@@ -594,6 +615,16 @@ def _is_success_task_status(status: str) -> bool:
 class CreateProjectRequest(BaseModel):
     name: str
     description: str = ""
+
+
+class OperationEventRequest(BaseModel):
+    operation: str
+    project_id: str = ""
+    provider: str = ""
+    model: str = ""
+    task_id: str = ""
+    status: str = "success"
+    error: str = ""
 
 class UpdateProjectRequest(BaseModel):
     name: str = ""
@@ -688,6 +719,28 @@ async def list_projects(limit: int = 50):
 @router.post("/projects")
 async def create_project(req: CreateProjectRequest):
     return await _db_call(db.create_game_project, name=req.name, description=req.description)
+
+
+@router.post("/operation-event")
+async def operation_event(req: OperationEventRequest):
+    operation = (req.operation or "").strip()
+    if not operation:
+        raise HTTPException(400, "operation is required")
+    status = (req.status or "success").strip().lower()
+    if status not in {"success", "failed"}:
+        status = "success"
+    await _db_call(
+        db.create_game_operation_event,
+        project_id=req.project_id,
+        operation=operation[:120],
+        provider=(req.provider or "")[:80],
+        model=(req.model or "")[:120],
+        task_id=(req.task_id or "")[:120],
+        status=status,
+        error=req.error or "",
+    )
+    return {"ok": True}
+
 
 @router.get("/projects/{project_id}")
 async def get_project(project_id: str):
@@ -1063,6 +1116,12 @@ async def analyze_prompt(req: AnalyzePromptRequest):
             if not prompt:
                 raise Exception("模型没有返回提示词，请稍后重试。")
             _ensure_chinese_prompt_output(prompt, "生成提示词")
+            await _record_operation_success(
+                "analyze_prompt",
+                project_id=req.project_id,
+                provider=_prompt_provider(req.model),
+                model=req.model,
+            )
             return {"prompt": prompt}
         except Exception as exc:
             error_text = _friendly_ai_error(exc)
@@ -1118,6 +1177,12 @@ async def refresh_prompt(req: RefreshPromptRequest):
             if not prompt:
                 raise Exception("模型没有返回润色结果，请稍后重试。")
             _ensure_chinese_prompt_output(prompt, "润色提示词")
+            await _record_operation_success(
+                "refresh_prompt",
+                project_id=req.project_id,
+                provider=_prompt_provider(req.model),
+                model=req.model,
+            )
             return {"prompt": prompt}
         except Exception as exc:
             error_text = _friendly_ai_error(exc)
@@ -1221,6 +1286,11 @@ async def analyze_video(req: AnalyzeVideoRequest):
             if not prompt:
                 raise Exception("模型没有返回反推提示词，请稍后重试。")
             _ensure_chinese_prompt_output(prompt, "反推提示词")
+            await _record_operation_success(
+                "analyze_video",
+                provider=_prompt_provider(req.model),
+                model=req.model,
+            )
             return {"prompt": prompt}
         except Exception as exc:
             error_text = _friendly_ai_error(exc)

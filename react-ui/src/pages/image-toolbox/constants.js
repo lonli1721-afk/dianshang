@@ -1,4 +1,4 @@
-import { FileImage, Grid3X3, Images, Scissors, Sparkles, Users, Wand2 } from 'lucide-react'
+import { FileImage, Grid3X3, ImageIcon, Images, Scissors, Sparkles, Users, Wand2 } from 'lucide-react'
 
 export const PAID_IMAGE_TOOL_FEATURES_ENABLED = true
 export const PAID_FEATURE_NOTICE = '同风格角色九图仍在实验中；图片衍生和图片反推已开放体验，会继续走 provider queue 和现有并发控制。'
@@ -8,9 +8,10 @@ export const DEFAULT_CANDIDATE_BATCH_SIZE = 12
 export const MAX_IMAGE_BYTES = 12 * 1024 * 1024
 
 export const IMAGE_TOOL_TABS = [
+  { id: 'standalone', label: '图片生成', icon: ImageIcon, enabled: true },
   { id: 'watermark', label: '九图成片', icon: Grid3X3, enabled: true },
-  { id: 'derive', label: '图片衍生', icon: Wand2, enabled: true, status: '实验中' },
-  { id: 'reverse', label: '图片反推', icon: FileImage, enabled: true, status: '实验中' },
+  { id: 'derive', label: '图片衍生', icon: Wand2, enabled: true },
+  { id: 'reverse', label: '图片反推', icon: FileImage, enabled: true },
 ]
 
 export const NINE_IMAGE_SOURCE_MODES = [
@@ -67,6 +68,7 @@ export const DERIVE_MODELS_BY_PROVIDER = {
 
 export const REVERSE_MODELS = [
   { id: 'doubao-seed-2-0-pro-260215', name: '火山 Doubao Seed 2.0 Pro' },
+  { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash（实验）' },
   { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
   { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
   { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro' },

@@ -70,7 +70,17 @@ export const api = {
         throw new Error(text || `HTTP ${res.status}`)
       }
       const text = await res.text()
-      const data = JSON.parse(text.trim())
+      const trimmed = text.trim()
+      if (!trimmed) {
+        throw new Error('服务返回了空响应，通常是模型通道或代理连接中断，请稍后重试或切换模型。')
+      }
+      let data
+      try {
+        data = JSON.parse(trimmed)
+      } catch (parseError) {
+        const preview = trimmed.slice(0, 160)
+        throw new Error(`服务返回内容不是有效 JSON，可能是模型通道返回了错误页或连接被中断：${preview}`)
+      }
       if (data && data._error) throw new Error(data._error)
       return data
     } catch (e) {
@@ -235,6 +245,20 @@ export const api = {
     const sep = path.includes('?') ? '&' : '?'
     return `${base}${path}${token ? `${sep}token=${token}` : ''}`
   },
+}
+
+export function trackOperationEvent(payload = {}) {
+  const operation = String(payload.operation || '').trim()
+  if (!operation) return
+  api.post('/api/game/operation-event', {
+    operation,
+    project_id: payload.project_id || '',
+    provider: payload.provider || '',
+    model: payload.model || '',
+    task_id: payload.task_id || '',
+    status: payload.status || 'success',
+    error: payload.error || '',
+  }, { timeout: 10_000 }).catch(() => {})
 }
 
 /**

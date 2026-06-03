@@ -1,5 +1,6 @@
 export const AI_MODELS = [
   { id: 'doubao-seed-2-0-pro-260215', name: '火山 Doubao Seed 2.0 Pro' },
+  { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash（实验）' },
   { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro' },
   { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
   { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
@@ -7,6 +8,7 @@ export const AI_MODELS = [
 
 export const REVERSE_MODELS = [
   { id: 'doubao-seed-2-0-pro-260215', name: '火山 Doubao Seed 2.0 Pro (推荐)' },
+  { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash（实验）' },
   { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro (推荐)' },
   { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
 ]
