@@ -77,6 +77,24 @@ BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 
 IMAGE_MODEL_SPECS = [
     {
+        "id": "image2",
+        "name": "Image2 产品还原",
+        "provider": "jimeng",
+        "model_id": "doubao-seedream-5-0-260128",
+        "supports_ref_images": True,
+        "max_ref_images": 10,
+        "supports_edit": True,
+        "supported_qualities": ["2K", "4K"],
+        "default_quality": "2K",
+        "supports_prompt_optimization": True,
+        "prompt_optimization_modes": ["standard"],
+        "default_prompt_optimization": "standard",
+        "supports_web_search": True,
+        "supports_output_format": True,
+        "output_formats": ["png"],
+        "default_output_format": "png",
+    },
+    {
         "id": "seedream-5.0",
         "name": "Seedream 5.0 Lite（最新）",
         "provider": "jimeng",

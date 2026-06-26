@@ -108,7 +108,10 @@ async def save_game_upload(file, *, duration_lookup) -> dict:
     local_url = f"/api/files/{fname}"
     duration_seconds = None
     if ext in {"mp4", "mov", "webm", "m4v"} or (file.content_type or "").startswith("video/"):
-        duration_seconds = await duration_lookup(local_url)
+        try:
+            duration_seconds = await duration_lookup(local_url)
+        except Exception as exc:
+            logger.warning("Video duration lookup failed for %s: %s", local_url, exc)
     logger.info("Game upload: %s -> %s (%d bytes)", source_name, local_url, size)
     return {
         "url": local_url,

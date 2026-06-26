@@ -1,16 +1,25 @@
 import { useLocation, useNavigate } from 'react-router-dom'
-import { Settings, PanelLeftClose, PanelLeft, Gamepad2, Flame, Image as ImageIcon } from 'lucide-react'
+import {
+  Clapperboard,
+  Image as ImageIcon,
+  PanelLeft,
+  PanelLeftClose,
+  Settings,
+  Store,
+  Video,
+} from 'lucide-react'
 
 const NAV_ITEMS = [
-  { path: '/', label: '视频工作台', icon: Gamepad2 },
-  { path: '/viral-workbench', label: '爆款工作台', icon: Flame },
+  { path: '/', label: '视频工作台', icon: Video, matches: ['/', '/video-workbench', '/game-video'] },
+  { path: '/batch-video-workbench', label: '批量生成视频工作台', icon: Clapperboard },
   { path: '/image-toolbox', label: '图片工作台', icon: ImageIcon },
-  { path: '/settings', label: '设置', icon: Settings },
+  { path: '/settings', label: '系统设置', icon: Settings },
 ]
 
 export default function Sidebar({ collapsed, onToggle, onPrefetchSettings, user }) {
   const location = useLocation()
   const navigate = useNavigate()
+  void user
 
   return (
     <aside style={{
@@ -26,7 +35,8 @@ export default function Sidebar({ collapsed, onToggle, onPrefetchSettings, user 
     }}>
       <div style={{
         padding: collapsed ? '16px 12px' : '16px 18px',
-        display: 'flex', alignItems: 'center',
+        display: 'flex',
+        alignItems: 'center',
         justifyContent: collapsed ? 'center' : 'space-between',
         borderBottom: '1px solid var(--border)',
         minHeight: 56,
@@ -34,22 +44,33 @@ export default function Sidebar({ collapsed, onToggle, onPrefetchSettings, user 
         {!collapsed && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <div style={{
-              width: 28, height: 28, borderRadius: 9,
+              width: 28,
+              height: 28,
+              borderRadius: 9,
               background: 'var(--accent-gradient)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
               boxShadow: '0 2px 10px rgba(139,92,246,0.25)',
             }}>
-              <Gamepad2 size={14} color="#fff" />
+              <Store size={14} color="#fff" />
             </div>
-            <span style={{ fontSize: 14, fontWeight: 700, letterSpacing: -0.3 }}>游戏素材工具</span>
+            <span style={{ fontSize: 14, fontWeight: 700, letterSpacing: 0 }}>电商素材平台</span>
           </div>
         )}
         <button
+          type="button"
           onClick={onToggle}
           style={{
-            background: 'none', border: 'none', color: 'var(--text-muted)',
-            cursor: 'pointer', padding: 6, borderRadius: 8,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'none',
+            border: 'none',
+            color: 'var(--text-muted)',
+            cursor: 'pointer',
+            padding: 6,
+            borderRadius: 8,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
           }}
         >
           {collapsed ? <PanelLeft size={18} /> : <PanelLeftClose size={18} />}
@@ -59,10 +80,11 @@ export default function Sidebar({ collapsed, onToggle, onPrefetchSettings, user 
       <nav style={{ flex: 1, padding: '10px 8px', overflowY: 'auto' }}>
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon
-          const isActive = location.pathname === item.path
+          const isActive = item.matches ? item.matches.includes(location.pathname) : location.pathname === item.path
           return (
             <button
               key={item.path}
+              type="button"
               onMouseEnter={item.path === '/settings' ? onPrefetchSettings : undefined}
               onFocus={item.path === '/settings' ? onPrefetchSettings : undefined}
               onClick={() => navigate(item.path)}

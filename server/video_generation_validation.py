@@ -42,6 +42,7 @@ def validate_generate_video_request(
     model: str,
     duration: int,
     resolution: str,
+    aspect_ratio: str = "",
     image_url: str = "",
     character_refs: list[str] | None = None,
     scene_refs: list[str] | None = None,
@@ -79,6 +80,14 @@ def validate_generate_video_request(
             "advanced_video": "高级视频编辑",
         }.get(mode, mode)
         raise VideoGenerationValidationError(f"{spec.get('name') or model_id} 不支持{mode_label}，请切换合适的模型或生成模式。")
+
+    supported_aspect_ratios = set(str(item) for item in (spec.get("supported_aspect_ratios") or []))
+    requested_aspect_ratio = str(aspect_ratio or "").strip()
+    if supported_aspect_ratios and requested_aspect_ratio and requested_aspect_ratio not in supported_aspect_ratios:
+        allowed = "/".join(sorted(supported_aspect_ratios))
+        raise VideoGenerationValidationError(
+            f"{spec.get('name') or model_id} 只支持 {allowed} 画幅，请切换画幅后重试。"
+        )
 
     try:
         requested_duration = int(duration)

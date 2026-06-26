@@ -1,5 +1,5 @@
 import { memo, useMemo, useState } from 'react'
-import { Sparkles, User, LogIn, Loader2, AlertCircle, Eye, EyeOff } from 'lucide-react'
+import { Store, User, LogIn, Loader2, AlertCircle, Eye, EyeOff } from 'lucide-react'
 
 const pageStyle = {
   minHeight: '100vh',
@@ -139,14 +139,14 @@ function LoginForm({ onLogin }) {
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             boxShadow: '0 8px 32px rgba(139,92,246,0.35)',
           }}>
-            <Sparkles size={28} color="#fff" />
+            <Store size={28} color="#fff" />
           </div>
           <h1 style={{
             fontSize: 26, fontWeight: 700, margin: 0,
             background: 'linear-gradient(135deg, var(--text-primary), var(--accent))',
             WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
-          }}>玩皮AI</h1>
-          <p style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 8, letterSpacing: 0.5 }}>AI 视频创作平台</p>
+          }}>电商素材平台</h1>
+          <p style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 8, letterSpacing: 0.5 }}>电商素材平台</p>
         </div>
 
         <form onSubmit={handleSubmit}>
@@ -222,7 +222,7 @@ function LoginForm({ onLogin }) {
         </form>
 
         <div style={{ textAlign: 'center', marginTop: 24, fontSize: 11, color: 'var(--text-muted)', letterSpacing: 0.3 }}>
-          玩皮AI v2.0
+          电商素材平台 v1.0
         </div>
       </div>
     </div>

@@ -167,7 +167,7 @@ export function WatermarkPanel({
 }) {
   const [workspace, setWorkspace] = useState(() => loadImageToolWorkspace())
   const [sourceMode, setSourceMode] = useState('upload')
-  const [generateTheme, setGenerateTheme] = useState(() => workspace.generateTheme || '火锅消除小游戏')
+  const [generateTheme, setGenerateTheme] = useState(() => workspace.generateTheme || '户外保温杯商品图')
   const [generateStyle, setGenerateStyle] = useState(() => workspace.generateStyle || FRIEND_CIRCLE_NINE_GRID_STYLE)
   const [roleItems, setRoleItems] = useState(DEFAULT_ROLE_ITEMS)
   const [roleSuggestTopic, setRoleSuggestTopic] = useState(() => inferRoleSuggestionTopic(workspace.generateTheme || '甜品'))
@@ -460,7 +460,7 @@ export function WatermarkPanel({
 
   useEffect(() => {
     let alive = true
-    listWatermarkFonts('火锅消除小游戏')
+    listWatermarkFonts('户外保温杯商品图')
       .then(data => {
         if (!alive) return
         const fonts = data.fonts || []
@@ -931,7 +931,7 @@ export function WatermarkPanel({
 
   const runGenerateCandidates = async () => {
     if (!generateTheme.trim()) {
-      showPanelNotice('请先填写要生成的画面内容，比如“火锅消除小游戏食材素材”。', 'error', 'generate')
+      showPanelNotice('请先填写要生成的画面内容，比如“户外保温杯商品图”。', 'error', 'generate')
       return
     }
     if (!modelsLoaded) {
@@ -1501,7 +1501,7 @@ export function WatermarkPanel({
           <>
             <div className="image-tool-compact-prompt">
               <Field label="画面内容">
-                <textarea rows={2} value={generateTheme} onChange={event => setGenerateTheme(event.target.value)} placeholder="例：火锅消除小游戏食材素材" />
+                <textarea rows={2} value={generateTheme} onChange={event => setGenerateTheme(event.target.value)} placeholder="例：户外保温杯商品图" />
               </Field>
               <Field label="画风提示词">
                 <textarea rows={3} value={generateStyle} onChange={event => setGenerateStyle(event.target.value)} placeholder="例：2D 卡通，粗线条，白底或浅色底，统一构图" />
@@ -1548,7 +1548,7 @@ export function WatermarkPanel({
           <>
             <div className="image-tool-compact-prompt">
               <Field label="统一主题">
-                <textarea rows={2} value={generateTheme} onChange={event => setGenerateTheme(event.target.value)} placeholder="例：火锅消除小游戏" />
+                <textarea rows={2} value={generateTheme} onChange={event => setGenerateTheme(event.target.value)} placeholder="例：户外保温杯商品图" />
               </Field>
               <Field label="统一画风">
                 <textarea rows={3} value={generateStyle} onChange={event => setGenerateStyle(event.target.value)} placeholder="例：同一模板、同一构图、只替换主体元素" />

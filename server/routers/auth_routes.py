@@ -137,9 +137,12 @@ class UpdateUserRequest(BaseModel):
 SYNC_SETTING_KEYS = [
     "gemini_api_key", "qwen_api_key", "openai_api_key", "openai_base_url",
     "fal_api_key", "ark_api_key", "jimeng_api_key", "dashscope_api_key", "game_dashscope_api_key", "hunyuan_secret_id",
-    "hunyuan_secret_key", "vidu_api_key", "hailuo_api_key",
+    "hunyuan_secret_key", "vidu_api_key", "toapis_api_key", "toapis_base_url", "game_toapis_api_key", "game_toapis_base_url", "hailuo_api_key",
     "volcengine_tts_key", "fish_audio_api_key", "cosyvoice_base_url",
     "indextts_base_url", "nanobanana_api_key", "nanobanana_base_url", "api_proxy_url",
+    "doubao_speech_api_key", "game_doubao_speech_api_key",
+    "volcengine_asr_app_id", "volcengine_asr_access_key", "volcengine_asr_secret_key", "volcengine_asr_ws_endpoint",
+    "game_volcengine_asr_app_id", "game_volcengine_asr_access_key", "game_volcengine_asr_secret_key", "game_volcengine_asr_ws_endpoint",
     "comfyui_base_url",
 ]
 for _group in ("fa1", "fa1_hunbian", "fa2", "fa3", "market"):

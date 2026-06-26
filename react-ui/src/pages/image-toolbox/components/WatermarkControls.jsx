@@ -32,7 +32,7 @@ export function WatermarkControls({
   return (
     <>
       <Field label="水印文字">
-        <textarea rows={3} value={text} onChange={event => setText(event.target.value)} placeholder="例：火锅消除小游戏" />
+        <textarea rows={3} value={text} onChange={event => setText(event.target.value)} placeholder="例：户外保温杯商品图" />
       </Field>
       <div className="image-tool-form-grid">
         <Field label="成品类型">

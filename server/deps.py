@@ -14,6 +14,7 @@ import hashlib
 import base64
 import io
 import time
+import ipaddress
 from pathlib import Path
 from typing import Optional
 from contextvars import ContextVar
@@ -47,11 +48,13 @@ ai_service = None
 openai_service = None
 jimeng_service = None
 vidu_service = None
+toapis_video_service = None
 
 # 游戏专用服务实例
 game_ai_service = None
 game_jimeng_service = None
 game_vidu_service = None
+game_toapis_video_service = None
 
 _video_tasks: dict[str, dict] = {}
 
@@ -500,6 +503,16 @@ def build_signed_public_file_url(url: str, expires_in_seconds: int = 3600) -> st
         return url
     public_base = (os.environ.get("PUBLIC_BASE_URL", "") or "").rstrip("/")
     if not public_base:
+        return url
+    try:
+        host = (urlparse(public_base).hostname or "").lower()
+    except Exception:
+        host = ""
+    try:
+        host_is_private = ipaddress.ip_address(host).is_private
+    except ValueError:
+        host_is_private = host in {"localhost"}
+    if host_is_private:
         return url
 
     filename = local_path.rsplit("/", 1)[-1].split("?", 1)[0].split("#", 1)[0]
@@ -1032,7 +1045,7 @@ def get_local_video_duration_seconds(url: str) -> float | None:
             text=True,
             timeout=15,
         )
-    except (FileNotFoundError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, PermissionError, OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
         return _read_mp4_duration_seconds(filepath)
 
     raw = (completed.stdout or "").strip()

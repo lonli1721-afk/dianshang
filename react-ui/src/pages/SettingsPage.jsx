@@ -19,7 +19,7 @@ const NAV_ITEMS = [
   { id: 'about', label: '关于', icon: Info },
 ]
 
-function ApiKeyCard({ icon, title, description, linkText, linkUrl, keyName, value, onChange, onSave, saved, error, accent, disabled, badge }) {
+function ApiKeyCard({ icon, title, description, linkText, linkUrl, keyName, value, onChange, onSave, saved, error, accent, disabled, badge, secret = true }) {
   const [show, setShow] = useState(false)
   const color = accent || 'var(--accent)'
   const CardIcon = icon
@@ -42,17 +42,19 @@ function ApiKeyCard({ icon, title, description, linkText, linkUrl, keyName, valu
       <div style={{ display: 'flex', gap: 8 }}>
         <div style={{ flex: 1, position: 'relative' }}>
           <input
-            type={show ? 'text' : 'password'} value={value} disabled={disabled}
+            type={secret && !show ? 'password' : 'text'} value={value} disabled={disabled}
             onChange={e => onChange(e.target.value)}
             placeholder={disabled ? '即将推出...' : `输入 ${title}...`}
             style={{ width: '100%', paddingRight: 36, fontSize: 13 }}
           />
-          <button onClick={() => setShow(p => !p)} style={{
-            position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)',
-            background: 'none', color: 'var(--text-muted)',
-          }}>
-            {show ? <EyeOff size={14} /> : <Eye size={14} />}
-          </button>
+          {secret && (
+            <button onClick={() => setShow(p => !p)} style={{
+              position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)',
+              background: 'none', color: 'var(--text-muted)',
+            }}>
+              {show ? <EyeOff size={14} /> : <Eye size={14} />}
+            </button>
+          )}
         </div>
         <button onClick={onSave} disabled={disabled} style={{
           display: 'flex', alignItems: 'center', gap: 5,
@@ -84,6 +86,8 @@ const API_KEYS = [
     items: [
       { key: 'ark_api_key', title: 'ARK_API_KEY（火山引擎：Seedream 生图 + Seedance 生视频）', desc: '用于即梦 Seedream 图片生成和 Seedance 视频生成。前往', link: '火山引擎控制台', url: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey', accent: '#ff6b35' },
       { key: 'vidu_api_key', title: 'VIDU_API_KEY（Vidu 生视频）', desc: '用于 VIDU 视频生成（文生视频/图生视频）。前往', link: 'VIDU 开放平台', url: 'https://platform.vidu.cn/usage', accent: '#8b5cf6' },
+      { key: 'toapis_api_key', title: 'TOAPIS_API_KEY（Veo 3.1 视频）', desc: '用于 ToAPIs 调用 veo3.1-fast、veo3.1-lite、veo3.1-quality。前往', link: 'ToAPIs 文档', url: 'https://docs.toapis.com/docs/cn', accent: '#14b8a6' },
+      { key: 'toapis_base_url', title: 'ToAPIs Base URL（可选）', desc: '默认 https://toapis.com；如果你使用代理或自建兼容地址，可在这里填写。', link: 'ToAPIs', url: 'https://docs.toapis.com/docs/cn', accent: '#14b8a6', isUrl: true },
       { key: 'hailuo_api_key', title: 'HAILUO_API_KEY（海螺 TTS + 视频）', desc: '用于海螺 TTS 配音和视频生成（支持1080P）。前往', link: 'MiniMax 开放平台', url: 'https://platform.minimaxi.com/user-center/basic-information/interface-key', accent: '#06b6d4' },
       { key: 'kling_api_key', title: 'KLING_API_KEY（可灵）', desc: '可灵视频生成（即将推出）。', link: '可灵开放平台', url: 'https://klingai.com/', accent: '#a855f7', disabled: true, badge: '即将推出' },
       { key: 'nanobanana_pro_api_key', title: 'NanoBanana Pro API Key', desc: 'NanoBanana Pro 图像生成。前往', link: 'NanoBanana', url: 'https://grsai.dakka.com.cn', accent: '#f59e0b' },
@@ -100,6 +104,13 @@ const API_KEYS = [
       { key: 'gemini_api_key', title: 'Google Gemini API Key', desc: '用于 AI 对话、剧本分析。前往', link: 'Google AI Studio', url: 'https://aistudio.google.com/apikey', accent: '#4285f4' },
       { key: 'qwen_api_key', title: '千问 API Key (阿里云百炼)', desc: '用于千问3-32B/235B等模型，国内直连无需代理。前往', link: '阿里云百炼控制台', url: 'https://bailian.console.aliyun.com/?apiKey=1#/api-key', accent: '#ff6a00' },
       { key: 'dashscope_api_key', title: 'DashScope API Key（万相视频换人）', desc: '用于阿里云万相 wan2.2-animate-mix 视频换人。前往', link: '阿里云百炼控制台', url: 'https://bailian.console.aliyun.com/?apiKey=1#/api-key', accent: '#3b82f6' },
+    ],
+  },
+  {
+    section: '直播转写 / 语音识别',
+    icon: Video,
+    items: [
+      { key: 'doubao_speech_api_key', title: '豆包语音 API Key（语音识别 / ASR）', desc: '用于豆包语音新版的语音识别和流式转写。这里填 API Key 管理页里创建的 Key 即可。前往', link: '豆包语音 API Key 管理', url: 'https://console.volcengine.com/speech/app', accent: '#f97316' },
     ],
   },
   {
@@ -208,6 +219,7 @@ function ApiKeysPanel({ keys, saved, error, onUpdateKey, onSaveKey }) {
               value={keys[item.key] || ''} onChange={v => onUpdateKey(item.key, v)}
               onSave={() => onSaveKey(item.key, keys[item.key] || '')}
               saved={saved} error={error} disabled={item.disabled} badge={item.badge}
+              secret={item.secret !== false}
             />
           ))}
         </div>
@@ -988,10 +1000,10 @@ function AboutPanel({ version }) {
     <div style={{ background: 'var(--bg-secondary)', borderRadius: 'var(--radius)', padding: 20, border: '1px solid var(--border)' }}>
       <span style={{ fontSize: 14, fontWeight: 600, display: 'block', marginBottom: 10 }}>关于</span>
       <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 2 }}>
-        <div>应用名称：玩皮AI</div>
+        <div>应用名称：电商素材平台</div>
         <div>版本：{version || '1.0.0'}</div>
         <div>技术栈：Tauri + React + FastAPI + Gemini + FAL + 即梦(ARK) + VIDU + 海螺</div>
-        <div>功能：AI 剧制作、图像生成、视频生成、AutoAgent 自动出片</div>
+        <div>功能：视频工作台、图片工作台、素材反推、批量生成、素材下载</div>
       </div>
     </div>
   )

@@ -44,6 +44,7 @@ from ai_service import AIService, split_api_keys
 from openai_service import OpenAIService
 from jimeng_service import JimengService
 from vidu_service import ViduService
+from toapis_service import ToapisVideoService
 from settings import SettingsManager
 from cloud_sync import CloudSyncManager
 from observability import is_local_observability_request
@@ -62,6 +63,7 @@ ai_service: Optional[AIService] = None
 openai_service: Optional[OpenAIService] = None
 jimeng_service: Optional[JimengService] = None
 vidu_service: Optional[ViduService] = None
+toapis_video_service: Optional[ToapisVideoService] = None
 
 _cloud_sync = CloudSyncManager(settings_manager, db)
 deps.cloud_sync = _cloud_sync
@@ -87,15 +89,17 @@ def _get_setting_key_pool(*names: str) -> list[str]:
 
 
 def _init_services():
-    global ai_service, openai_service, jimeng_service, vidu_service
+    global ai_service, openai_service, jimeng_service, vidu_service, toapis_video_service
     hk_proxy = _get_proxy_url()
     ai_service = None
     openai_service = None
     jimeng_service = None
     vidu_service = None
+    toapis_video_service = None
     deps.game_ai_service = None
     deps.game_jimeng_service = None
     deps.game_vidu_service = None
+    deps.game_toapis_video_service = None
 
     gemini_keys = _get_setting_key_pool("gemini_api_keys", "gemini_api_key")
     if gemini_keys:
@@ -119,10 +123,18 @@ def _init_services():
     if k:
         vidu_service = ViduService(api_key=k)
 
+    k = settings_manager.get("toapis_api_key", "")
+    if k:
+        toapis_video_service = ToapisVideoService(
+            api_key=k,
+            base_url=settings_manager.get("toapis_base_url", ""),
+        )
+
     deps.ai_service = ai_service
     deps.openai_service = openai_service
     deps.jimeng_service = jimeng_service
     deps.vidu_service = vidu_service
+    deps.toapis_video_service = toapis_video_service
     deps.settings_manager = settings_manager
 
     # 游戏专用服务
@@ -137,6 +149,12 @@ def _init_services():
     gk = settings_manager.get("game_vidu_api_key", "")
     if gk:
         deps.game_vidu_service = ViduService(api_key=gk)
+    gk = settings_manager.get("game_toapis_api_key", "")
+    if gk:
+        deps.game_toapis_video_service = ToapisVideoService(
+            api_key=gk,
+            base_url=settings_manager.get("game_toapis_base_url", "") or settings_manager.get("toapis_base_url", ""),
+        )
 
 
 AUTH_ENABLED = os.environ.get("AUTH_ENABLED", "true").lower() in ("true", "1", "yes")
@@ -302,6 +320,9 @@ app.include_router(viral_router, prefix="/api/viral", tags=["viral"])
 from routers.image_tools_routes import router as image_tools_router
 app.include_router(image_tools_router, prefix="/api/image-tools", tags=["image-tools"])
 
+from routers.batch_video_routes import router as batch_video_router
+app.include_router(batch_video_router, prefix="/api/batch-video", tags=["batch-video"])
+
 # ═══════════════════ 健康检查 & 设置 ═══════════════════
 
 @app.api_route("/health", methods=["GET", "HEAD"])
@@ -413,7 +434,7 @@ async def get_settings(request: Request):
 async def update_setting(body: SettingsUpdate, request: Request):
     deps.require_admin(request)
     settings_manager.set(body.key, body.value)
-    global ai_service, openai_service, jimeng_service, vidu_service
+    global ai_service, openai_service, jimeng_service, vidu_service, toapis_video_service
     v = str(body.value) if body.value else ""
     hk_proxy = _get_proxy_url()
     if body.key == "api_proxy_url":
@@ -437,6 +458,8 @@ async def update_setting(body: SettingsUpdate, request: Request):
     elif body.key == "vidu_api_key" and v:
         vidu_service = ViduService(api_key=v)
         deps.vidu_service = vidu_service
+    elif body.key in ("toapis_api_key", "toapis_base_url", "game_toapis_api_key", "game_toapis_base_url"):
+        _init_services()
     return {"success": True}
 
 

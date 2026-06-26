@@ -82,10 +82,10 @@ export default function ImageToolboxPage() {
     <div className="image-toolbox image-tool-readable">
       <header className="image-tool-header">
         <div>
-          <h1>图片工具箱</h1>
-          <p>九图成片、图片衍生和批量图片反推集中处理，结果仅保存在当前账号目录。</p>
+          <h1>图片工作台</h1>
+          <p>电商主图、详情页切片、图片衍生和批量图片反推集中处理，结果仅保存在当前账号目录。</p>
         </div>
-        <div className="image-tool-badge"><BadgeCheck size={16} />图片流程</div>
+        <div className="image-tool-badge"><BadgeCheck size={16} />图片工作台</div>
       </header>
 
       <ToolTabs

@@ -36,7 +36,7 @@ export function suggestRoleItems(payload) {
   return api.post('/api/image-tools/role-suggestions', payload)
 }
 
-export function listWatermarkFonts(previewText = '火锅消除小游戏') {
+export function listWatermarkFonts(previewText = '户外保温杯商品图') {
   return api.get(`/api/image-tools/fonts?preview_text=${encodeURIComponent(previewText)}`)
 }
 

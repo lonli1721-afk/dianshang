@@ -1,4 +1,4 @@
-import { FolderOpen, Gamepad2, Pencil, Plus, Settings, Trash2 } from 'lucide-react'
+import { Clapperboard, FolderOpen, Pencil, Plus, Settings, Trash2 } from 'lucide-react'
 
 export default function ProjectListPanel({
   projects,
@@ -22,8 +22,8 @@ export default function ProjectListPanel({
   return (
     <div style={{ padding: 32, maxWidth: 900, margin: '0 auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 28 }}>
-        <Gamepad2 size={28} color="var(--accent)" />
-        <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>游戏视频素材工具</h1>
+        <Clapperboard size={28} color="var(--accent)" />
+        <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>电商视频素材工具</h1>
         <div style={{ flex: 1 }} />
         <button onClick={onOpenSettings} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 16px', borderRadius: 8, fontSize: 12, background: 'var(--bg-secondary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}>
           <Settings size={14} /> API 设置
@@ -45,7 +45,7 @@ export default function ProjectListPanel({
       </div>
       {projects.length === 0 ? (
         <div style={{ textAlign: 'center', padding: 60, color: 'var(--text-muted)', background: 'var(--bg-secondary)', borderRadius: 16, border: '1px solid var(--border)' }}>
-          <Gamepad2 size={48} style={{ opacity: 0.3, marginBottom: 16 }} /><div style={{ fontSize: 15 }}>还没有项目，点击上方"新建项目"开始</div>
+          <Clapperboard size={48} style={{ opacity: 0.3, marginBottom: 16 }} /><div style={{ fontSize: 15 }}>还没有项目，点击上方"新建项目"开始</div>
         </div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 16 }}>

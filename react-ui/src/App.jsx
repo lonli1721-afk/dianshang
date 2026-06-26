@@ -4,15 +4,16 @@ import { TaskProvider } from './components/TaskLog'
 import TitleBar from './components/TitleBar'
 import Sidebar from './components/Sidebar'
 import GameVideoPage from './pages/game/GameVideoPage'
-import ViralWorkbenchPage from './pages/viral/ViralWorkbenchPage'
 import LoginPage from './pages/LoginPage'
 import { trackOperationEvent } from './services/api'
 
 const THEME_MODES = new Set(['system', 'light', 'dark'])
 const loadSettingsPage = () => import('./pages/SettingsPage')
 const loadImageToolboxPage = () => import('./pages/ImageToolboxPage')
+const loadBatchVideoWorkbenchPage = () => import('./pages/BatchVideoWorkbenchPage')
 const SettingsPage = lazy(loadSettingsPage)
 const ImageToolboxPage = lazy(loadImageToolboxPage)
+const BatchVideoWorkbenchPage = lazy(loadBatchVideoWorkbenchPage)
 
 function preloadSettingsPage() {
   void loadSettingsPage().catch(() => {})
@@ -286,8 +287,8 @@ export default function App() {
       const hash = window.location.hash || ''
       let area = 'download'
       if (hash.includes('image-toolbox')) area = 'download_image_toolbox'
-      else if (hash.includes('viral-workbench')) area = 'download_viral_workbench'
-      else if (hash.includes('game-video') || hash === '' || hash === '#/' || hash === '#') area = 'download_game_video'
+      else if (hash.includes('batch-video-workbench')) area = 'download_batch_video_workbench'
+      else if (hash.includes('video-workbench') || hash.includes('game-video') || hash === '' || hash === '#/' || hash === '#') area = 'download_video_workbench'
       trackOperationEvent({ operation: area })
     }
     document.addEventListener('click', handleDownloadClick, true)
@@ -340,13 +341,21 @@ export default function App() {
               <main style={{ flex: 1, overflow: 'auto', background: 'var(--bg-primary)' }}>
                 <Routes>
                   <Route path="/" element={<GameVideoPage />} />
+                  <Route path="/video-workbench" element={<GameVideoPage />} />
                   <Route path="/game-video" element={<GameVideoPage />} />
-                  <Route path="/viral-workbench" element={<ViralWorkbenchPage />} />
                   <Route
                     path="/image-toolbox"
                     element={(
                       <Suspense fallback={<RouteLoadingFallback />}>
                         <ImageToolboxPage />
+                      </Suspense>
+                    )}
+                  />
+                  <Route
+                    path="/batch-video-workbench"
+                    element={(
+                      <Suspense fallback={<RouteLoadingFallback />}>
+                        <BatchVideoWorkbenchPage />
                       </Suspense>
                     )}
                   />

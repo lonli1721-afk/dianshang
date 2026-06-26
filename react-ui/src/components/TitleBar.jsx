@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Minus, Square, X, Copy, LogOut, User, Sparkles } from 'lucide-react'
+import { Minus, Square, X, Copy, LogOut, User, Store } from 'lucide-react'
 
 export default function TitleBar({ user, onLogout }) {
   const [maximized, setMaximized] = useState(false)
@@ -44,13 +44,13 @@ export default function TitleBar({ user, onLogout }) {
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           boxShadow: '0 2px 8px rgba(139,92,246,0.2)',
         }}>
-          <Sparkles size={12} color="#fff" />
+          <Store size={12} color="#fff" />
         </div>
         <span style={{
           fontSize: 13, fontWeight: 600,
           background: 'linear-gradient(135deg, var(--text-secondary), var(--accent))',
           WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
-        }}>玩皮AI</span>
+        }}>电商素材平台</span>
       </div>
 
       {user && user.username !== 'local' && (

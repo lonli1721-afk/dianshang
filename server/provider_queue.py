@@ -27,6 +27,7 @@ PROVIDER_LABELS = {
     "vidu": "VIDU",
     "openai": "OpenAI",
     "gemini": "Gemini",
+    "toapis": "ToAPIs",
 }
 
 
@@ -50,6 +51,7 @@ def _provider_limit(provider_key: str) -> int:
         "vidu": 2,
         "openai": 1,
         "gemini": 3,
+        "toapis": 2,
         "default": 3,
     }
     specific_name = f"GAME_PROVIDER_{provider_key.upper()}_CONCURRENCY"

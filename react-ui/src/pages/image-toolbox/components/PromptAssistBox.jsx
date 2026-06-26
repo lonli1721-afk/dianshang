@@ -122,10 +122,10 @@ export function PromptAssistBox({
   return (
     <div className="image-tool-prompt-assist">
       <Field label="画面内容">
-        <textarea rows={2} value={theme} onChange={event => onThemeChange(event.target.value)} placeholder="例：火锅消除小游戏，番茄锅、肥牛、丸子、金针菇等食材堆叠" />
+        <textarea rows={2} value={theme} onChange={event => onThemeChange(event.target.value)} placeholder="例：户外保温杯商品图，杯身、杯盖、手提绳、包装盒等素材组合" />
       </Field>
       <Field label="画风提示词">
-        <textarea rows={3} value={visualStyle} onChange={event => onVisualStyleChange(event.target.value)} placeholder="例：微信朋友圈九宫格素材，2D 卡通休闲消除小游戏，白底或浅色底，粗线条，统一画风" />
+        <textarea rows={3} value={visualStyle} onChange={event => onVisualStyleChange(event.target.value)} placeholder="例：电商主图九宫格素材，干净棚拍质感，白底或浅色底，统一光影和构图" />
       </Field>
       <div className="image-tool-style-lock">
         <div className="image-tool-style-lock-head">

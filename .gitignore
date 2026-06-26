@@ -43,6 +43,10 @@ id_ed25519
 .DS_Store
 Thumbs.db
 
+# Local visual references generated during prompt/video inspection
+reference_contact_sheet.jpg
+sample_frame_*.jpg
+
 # Logs & archives
 *.log
 *.tar.gz

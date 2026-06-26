@@ -290,6 +290,16 @@ def _happyhorse():
     return None
 
 
+def _toapis():
+    """Per-user ToAPIs video service."""
+    k = _user_key("toapis_api_key")
+    base_url = _user_key("toapis_base_url")
+    if k:
+        from toapis_service import ToapisVideoService
+        return ToapisVideoService(api_key=k, base_url=base_url)
+    return deps.game_toapis_video_service or deps.toapis_video_service
+
+
 def _ai():
     """Per-user AI service (with proxy for China servers)."""
     keys = _user_key_pool("gemini_api_key")
@@ -973,11 +983,28 @@ async def _resolve_happyhorse_image_reference(url: str) -> str:
     )
 
 
+async def _resolve_toapis_image_reference(url: str, svc) -> str:
+    local_path = deps.get_local_file_path_from_url(url)
+    if local_path:
+        return await svc.upload_image_path(local_path)
+    public_url = await deps.resolve_image_as_public_url(url)
+    if public_url and public_url.startswith(("http://", "https://")):
+        return public_url
+    if url.startswith("data:image"):
+        image_bytes, mime, ext = await _read_reference_media(url, "image")
+        return await svc.upload_image_bytes(f"reference.{ext or 'png'}", image_bytes, mime)
+    if public_url:
+        raise HTTPException(400, "ToAPIs Veo 参考图需要公网 URL；本地图片会自动上传，若仍失败请重新上传图片后重试。")
+    return url
+
+
 async def _resolve_provider_image_reference(url: str, provider: str) -> str:
     if provider == "jimeng":
         return await _resolve_jimeng_image_reference(url)
     if provider == "happyhorse":
         return await _resolve_happyhorse_image_reference(url)
+    if provider == "toapis":
+        return url
     return await deps.resolve_image_for_external(url)
 
 
@@ -1420,6 +1447,7 @@ async def generate_video(req: GenerateVideoRequest):
             model=req.model,
             duration=req.duration,
             resolution=req.resolution,
+            aspect_ratio=req.aspect_ratio,
             image_url=req.image_url,
             character_refs=req.character_refs,
             scene_refs=req.scene_refs,
@@ -1669,6 +1697,41 @@ async def generate_video(req: GenerateVideoRequest):
                 result["task_record_warning"] = task_record_warning
             return result
 
+        elif provider == "toapis":
+            svc = _toapis()
+            if not svc:
+                raise Exception("ToAPIs API key is not configured")
+            if resolved_reference_video or advanced_reference_videos:
+                raise Exception("ToAPIs Veo 3.1 暂不支持参考视频，请使用文字或参考图生成。")
+            model = validation.model_spec["id"]
+            raw_refs = [url for url in [req.image_url, *req.character_refs, *req.scene_refs] if url]
+            image_urls = []
+            for url in raw_refs[:3]:
+                image_urls.append(await _resolve_toapis_image_reference(url, svc))
+            result = await _provider_call(
+                "toapis",
+                "generate_video",
+                lambda: svc.generate_video(
+                    prompt=req.prompt,
+                    model=model,
+                    aspect_ratio=req.aspect_ratio,
+                    image_urls=image_urls,
+                ),
+            )
+            deps._video_tasks[result["task_id"]] = {**result, "provider": "toapis"}
+            task_record_payload = build_generate_task_record_payload(
+                project_id=req.project_id,
+                prompt=req.prompt,
+                model=model,
+                provider="toapis",
+                character_refs=req.character_refs,
+                scene_refs=req.scene_refs,
+            )
+            task_record_warning = await _ensure_game_task_record(result["task_id"], task_record_payload)
+            if task_record_warning:
+                result["task_record_warning"] = task_record_warning
+            return result
+
         raise Exception(f"不支持的视频服务商: {provider}")
 
     async def _do_generate_video_with_event():
@@ -1797,6 +1860,8 @@ async def _query_provider_task_status(task_id: str, provider: str) -> dict:
         return await _vidu().query_task(task_id)
     if provider == "happyhorse" and _happyhorse():
         return await _happyhorse().query_task(task_id)
+    if provider == "toapis" and _toapis():
+        return await _toapis().query_task(task_id)
     if provider == "wan" and _wan():
         return await _wan().query_task(task_id)
     raise HTTPException(404, "Task not found or provider is not configured")
@@ -1863,6 +1928,8 @@ def get_video_model_specs() -> list[dict]:
         available_providers.add("vidu")
     if _happyhorse():
         available_providers.add("happyhorse")
+    if _toapis():
+        available_providers.add("toapis")
     return _catalog_video_model_specs(provider_filter=available_providers)
 
 
@@ -1923,7 +1990,10 @@ async def list_project_tasks(project_id: str, limit: int = 50):
 # Game-specific settings
 GAME_SETTING_KEYS = [
     "game_gemini_api_key", "game_gemini_api_keys", "game_ark_api_key", "game_vidu_api_key",
-    "game_dashscope_api_key", "game_api_usage_group",
+    "game_dashscope_api_key", "game_toapis_api_key", "game_toapis_base_url", "game_api_usage_group",
+    "game_doubao_speech_api_key",
+    "game_volcengine_asr_app_id", "game_volcengine_asr_access_key",
+    "game_volcengine_asr_secret_key", "game_volcengine_asr_ws_endpoint",
 ]
 
 class GameSettingRequest(BaseModel):
