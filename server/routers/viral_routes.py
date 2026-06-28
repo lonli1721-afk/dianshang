@@ -82,6 +82,8 @@ CHINESE_RETRY_RULES = """
 - 保持内容详细度，不要因为中文约束而缩短分析。
 """.strip()
 
+VIRAL_VIDEO_SOUND_RULE = "【声音规则】不要背景音乐、BGM、配乐、音乐节奏或鼓点；声音只允许现场音效和一条自然中文旁白。"
+
 _COMMON_ENGLISH_TERM_TRANSLATIONS = [
     (re.compile(r"\bCTA\b", re.IGNORECASE), "行动引导"),
     (re.compile(r"\bA/B\s*test(?:ing)?\b", re.IGNORECASE), "对照测试"),
@@ -101,6 +103,39 @@ def _localize_viral_text(value) -> str:
     text = _clip(value, 2400)
     for pattern, replacement in _COMMON_ENGLISH_TERM_TRANSLATIONS:
         text = pattern.sub(replacement, text)
+    return text
+
+
+def _normalize_viral_video_prompt(value) -> str:
+    text = _localize_viral_text(value)
+    stale_blocks = [
+        r"【声音规则】[^。]*。?",
+        r"声音规则[:：][^。]*。?",
+        r"【声音限制】[^。]*(?:背景音乐|BGM|bgm|配乐|音乐节奏|轻音乐|鼓点|现场音效|旁白)[^。]*。?",
+        r"【声音限制】不要生成[^。]*(?:旁白|配音|语音音轨)[^。]*。?",
+        r"不要生成[^。；]*(?:旁白|配音|语音音轨)[^。；]*(?:[。；]|$)",
+        r"只保留真实现场环境音[^。；]*(?:[。；]|$)",
+        r"不要(?:生成|出现|加入|使用|有)?[^。；]*(?:背景音乐|BGM|bgm|配乐|音乐节奏|轻音乐|鼓点)[^。；]*(?:[。；]|$)",
+    ]
+    for pattern in stale_blocks:
+        text = re.sub(pattern, "", text)
+    replacements = {
+        "低频户外广告鼓点": "现场音效",
+        "低频鼓点": "现场音效",
+        "音乐节奏": "现场音效",
+        "轻音乐节奏": "现场音效",
+        "背景音乐": "现场音效",
+        "轻音乐": "现场音效",
+        "配乐": "现场音效",
+        "BGM": "现场音效",
+        "bgm": "现场音效",
+        "鼓点": "现场音效",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    text = re.sub(r"\s+", " ", text).strip()
+    if text and VIRAL_VIDEO_SOUND_RULE not in text:
+        text = f"{text} {VIRAL_VIDEO_SOUND_RULE}"
     return text
 
 
@@ -512,7 +547,7 @@ def _normalize_plan(raw, index: int, tag_ids: list[str]) -> dict:
         "test_objective": _localize_viral_text(item.get("test_objective") or item.get("objective"))[:360],
         "script_outline": [_localize_viral_text(value)[:260] for value in _as_list(item.get("script_outline") or item.get("script"), 10)],
         "storyboard_rhythm": [_localize_viral_text(value)[:260] for value in _as_list(item.get("storyboard_rhythm") or item.get("rhythm"), 10)],
-        "video_prompt": _localize_viral_text(item.get("video_prompt") or item.get("prompt"))[:1600],
+        "video_prompt": _normalize_viral_video_prompt(item.get("video_prompt") or item.get("prompt"))[:1600],
     }
 
 
@@ -725,7 +760,8 @@ def _build_plan_prompt(analysis: dict, selected_tags: list[dict], req: ViralPlan
 - 每个方案必须包含改动点、测试目的、脚本大纲、分镜节奏、视频提示词。
 - 每个方案都要围绕主爆点展开，同时明确其余勾选爆点如何辅助。
 - change_points 至少 3 条，script_outline 至少 5 段，storyboard_rhythm 至少 5 段。
-- 视频提示词必须直接用中文写成可用于后续视频生成的完整提示词，至少 180 个中文字，包含画面、动作、镜头、节奏、情绪、字幕/音效建议和结尾行动引导。
+- 视频提示词必须直接用中文写成可用于后续视频生成的完整提示词，至少 180 个中文字，包含画面、动作、镜头、节奏、情绪、字幕、现场音效、旁白和结尾行动引导。
+- 视频提示词的声音规则必须固定：不要背景音乐、BGM、配乐、音乐节奏或鼓点；声音只允许现场音效和一条自然中文旁白。
 
 JSON 格式：
 {{
@@ -797,7 +833,8 @@ def _build_rewrite_prompt(analysis: dict, plan: dict, targets: list[str], instru
 - 不是在原文后面追加一句话，而是结合用户要求整体改写对应字段。
 - 保留原方案的核心测试目标和已选爆点逻辑，除非用户要求改变。
 - `script_outline` 和 `storyboard_rhythm` 必须按一行一个镜头/段落拆分为数组。
-- `video_prompt` 必须直接用中文写成一段可用于视频生成的完整提示词，至少 180 个中文字，包含画面、动作、镜头、节奏、情绪、字幕/音效建议和结尾行动引导。
+- `video_prompt` 必须直接用中文写成一段可用于视频生成的完整提示词，至少 180 个中文字，包含画面、动作、镜头、节奏、情绪、字幕、现场音效、旁白和结尾行动引导。
+- `video_prompt` 的声音规则必须固定：不要背景音乐、BGM、配乐、音乐节奏或鼓点；声音只允许现场音效和一条自然中文旁白。
 
 JSON 格式示例：
 {{

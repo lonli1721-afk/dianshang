@@ -458,7 +458,7 @@ async def update_setting(body: SettingsUpdate, request: Request):
     elif body.key == "vidu_api_key" and v:
         vidu_service = ViduService(api_key=v)
         deps.vidu_service = vidu_service
-    elif body.key in ("toapis_api_key", "toapis_base_url", "game_toapis_api_key", "game_toapis_base_url"):
+    elif body.key in ("toapis_api_key", "toapis_base_url", "game_toapis_api_key", "game_toapis_base_url", "toapis_video_credit_prices", "toapis_usd_cny_rate"):
         _init_services()
     return {"success": True}
 
@@ -631,12 +631,16 @@ async def upload_file(file: UploadFile = File(...), category: str = Form("files"
 async def serve_file(filename: str):
     filename = Path(filename).name
     filepath = deps.find_local_file_path(filename)
+    if not filepath and os.environ.get("ALLOW_LOCAL_FILE_FALLBACK", "").lower() in ("1", "true", "yes"):
+        filepath = deps.find_local_file_path(filename, include_all_user_dirs=True)
     if not filepath or not filepath.exists():
         raise HTTPException(404, "文件不存在")
     media_types = {
         ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
         ".gif": "image/gif", ".webp": "image/webp", ".mp3": "audio/mpeg",
-        ".wav": "audio/wav", ".mp4": "video/mp4", ".webm": "video/webm",
+        ".wav": "audio/wav", ".m4a": "audio/mp4", ".aac": "audio/aac",
+        ".flac": "audio/flac", ".ogg": "audio/ogg",
+        ".mp4": "video/mp4", ".webm": "video/webm",
     }
     ext = filepath.suffix.lower()
     return FileResponse(
@@ -661,7 +665,9 @@ async def serve_public_file(filename: str, request: Request):
     media_types = {
         ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
         ".gif": "image/gif", ".webp": "image/webp", ".mp3": "audio/mpeg",
-        ".wav": "audio/wav", ".mp4": "video/mp4", ".webm": "video/webm",
+        ".wav": "audio/wav", ".m4a": "audio/mp4", ".aac": "audio/aac",
+        ".flac": "audio/flac", ".ogg": "audio/ogg",
+        ".mp4": "video/mp4", ".webm": "video/webm",
         ".mov": "video/quicktime", ".mkv": "video/x-matroska",
     }
     ext = filepath.suffix.lower()

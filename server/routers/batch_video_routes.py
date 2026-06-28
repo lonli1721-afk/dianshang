@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import asyncio
+import math
 import os
 import re
+import struct
 import uuid
+import wave
 import json
 import hashlib
+import shutil
+import subprocess
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -14,7 +22,14 @@ from pydantic import BaseModel, Field
 
 import database as db
 import deps
-from doubao_speech_service import DoubaoSpeechError, transcribe_media_file
+from doubao_speech_service import DoubaoSpeechError, synthesize_speech_2_0_file, transcribe_media_file
+from video_model_registry import (
+    enrich_video_model_cost_estimates,
+    get_video_model_spec,
+    get_video_model_specs,
+    parse_toapis_credit_price_overrides,
+    parse_toapis_usd_cny_rate,
+)
 
 
 router = APIRouter()
@@ -26,6 +41,8 @@ ASR_API_KEY_FIELD = {
     "setting_keys": ["game_doubao_speech_api_key", "doubao_speech_api_key"],
     "env": "DOUBAO_SPEECH_API_KEY",
 }
+
+POSTER_TRANSITION_DURATION = 0.45
 
 ARK_MODEL_ID = "doubao-seed-2-0-pro-260215"
 ARK_CHAT_COMPLETIONS_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
@@ -97,9 +114,9 @@ IMAGE_MODELS = [
     {
         "id": "image2",
         "name": "Image2 产品还原",
-        "provider": "jimeng",
+        "provider": "openai_image",
         "available": True,
-        "note": "用于根据多张产品参考图生成完整产品详情表",
+        "note": "使用后端 OpenAI 配置调用 GPT Image 2 生成完整产品详情表",
     },
     {
         "id": "nanobanana",
@@ -110,49 +127,46 @@ IMAGE_MODELS = [
     },
 ]
 
-VIDEO_MODELS = [
-    {
-        "id": "seedance-2.0",
-        "name": "Seedance 2.0",
-        "provider": "jimeng",
-        "available": True,
-    },
-    {
-        "id": "happyhorse-1.0-i2v",
-        "name": "HappyHorse I2V",
-        "provider": "happyhorse",
-        "available": True,
-    },
-    {
-        "id": "happyhorse-1.0-t2v",
-        "name": "HappyHorse T2V",
-        "provider": "happyhorse",
-        "available": True,
-    },
-    {
-        "id": "veo3.1-fast",
-        "name": "Veo 3.1 Fast",
-        "provider": "toapis",
-        "available": True,
-    },
-    {
-        "id": "veo3.1-lite",
-        "name": "Veo 3.1 Lite",
-        "provider": "toapis",
-        "available": True,
-    },
-    {
-        "id": "veo3.1-quality",
-        "name": "Veo 3.1 Quality",
-        "provider": "toapis",
-        "available": True,
-    },
-]
-
-VEO_MODEL_IDS = {"veo3.1-fast", "veo3.1-lite", "veo3.1-quality"}
 DEFAULT_STORYBOARD_SCENE_COUNT = 6
 VEO_STORYBOARD_SCENE_COUNT = 4
 VEO_STORYBOARD_DURATION = 8
+WORKBENCH_DRAFT_SETTING_KEY = "batch_video_workbench_draft_v1"
+
+
+def _toapis_price_overrides() -> dict[str, float]:
+    return parse_toapis_credit_price_overrides(
+        deps.settings_manager.get("toapis_video_credit_prices", "")
+        if getattr(deps, "settings_manager", None)
+        else ""
+    )
+
+
+def _toapis_usd_cny_rate() -> float:
+    return parse_toapis_usd_cny_rate(
+        deps.settings_manager.get("toapis_usd_cny_rate", "")
+        if getattr(deps, "settings_manager", None)
+        else ""
+    )
+
+
+def _batch_video_models() -> list[dict]:
+    models = get_video_model_specs(
+        provider_filter=["jimeng", "happyhorse", "toapis"],
+        toapis_credit_prices=_toapis_price_overrides(),
+    )
+    batch_ids = {
+        "seedance-2.0",
+        "happyhorse-1.0-i2v",
+        "happyhorse-1.0-t2v",
+        *{item["id"] for item in models if item.get("provider") == "toapis"},
+    }
+    available = [{**item, "available": True} for item in models if item.get("id") in batch_ids]
+    return enrich_video_model_cost_estimates(available, toapis_usd_cny_rate=_toapis_usd_cny_rate())
+
+
+def _is_fixed_eight_second_model(model_id: str) -> bool:
+    spec = get_video_model_spec(model_id)
+    return spec.get("provider") == "toapis" and int(spec.get("min_duration") or 0) == 8 and int(spec.get("max_duration") or 0) == 8
 
 
 class ProductInput(BaseModel):
@@ -188,6 +202,7 @@ class StoryboardPlanRequest(BaseModel):
     product: ProductInput = Field(default_factory=ProductInput)
     selling_points: list[SellingPoint] = Field(default_factory=list)
     storyboard_reference_urls: list[str] = Field(default_factory=list)
+    creative_brief: str = ""
     language_model: str = "doubao-seed-2-0-pro-260215"
     image_model: str = "seedream-5.0"
     video_model: str = "seedance-2.0"
@@ -204,6 +219,13 @@ class ProductReconstructionRequest(BaseModel):
     aspect_ratio: str = "16:9"
 
 
+class ProductPosterRequest(BaseModel):
+    product: ProductInput = Field(default_factory=ProductInput)
+    selling_points: list[SellingPoint] = Field(default_factory=list)
+    image_model: str = "image2"
+    aspect_ratio: str = "9:16"
+
+
 class StoryboardScene(BaseModel):
     id: str = ""
     title: str = ""
@@ -211,6 +233,7 @@ class StoryboardScene(BaseModel):
     hook: str = ""
     image_prompt: str = ""
     video_prompt: str = ""
+    voiceover_text: str = ""
     shot_notes: str = ""
     storyboard_image_url: str = ""
     video_url: str = ""
@@ -223,6 +246,42 @@ class SubmitBatchRequest(BaseModel):
     video_model: str = "seedance-2.0"
     aspect_ratio: str = "9:16"
     duration: int = 5
+    resolution: str = "720p"
+
+
+class FinalVideoSegment(BaseModel):
+    scene_id: str = ""
+    title: str = ""
+    reference_mode: str = ""
+    video_url: str = ""
+    subtitle: str = ""
+    voiceover_text: str = ""
+    start_time: float | None = None
+    end_time: float | None = None
+
+
+class ComposeFinalVideoRequest(BaseModel):
+    segments: list[FinalVideoSegment] = Field(default_factory=list)
+    product_name: str = ""
+    aspect_ratio: str = "9:16"
+    subtitle_enabled: bool = True
+    voiceover_enabled: bool = True
+    keep_original_audio: bool = True
+    bgm_enabled: bool = True
+    bgm_url: str = ""
+    original_audio_volume: float = 0.78
+    voiceover_volume: float = 1.0
+    bgm_volume: float = 0.45
+    poster_image_url: str = ""
+    poster_duration: float = 2.0
+    tts_provider: str = "doubao_speech_2_0"
+    tts_voice_type: str = ""
+    tts_speed_ratio: float = 1.0
+    output_name: str = ""
+
+
+class WorkbenchDraftRequest(BaseModel):
+    draft: dict[str, Any] = Field(default_factory=dict)
 
 
 def _now() -> str:
@@ -505,15 +564,35 @@ def _normalize_text_selling_points(text: str) -> list[dict[str, str]]:
 
 def _sanitize_storyboard_prompt_text(text: str) -> str:
     cleaned = str(text or "")
+    stale_blocks = [
+        r"【声音规则】[^。]*。?",
+        r"声音规则[:：][^。]*。?",
+        r"【旁白】[\s\S]*?(?=【|$)",
+        r"旁白(?:内容)?[:：]\s*[“\"']?[^。；\n”\"']+[”\"']?(?:[。；\n]|$)",
+        r"【声音限制】[^。]*(?:背景音乐|BGM|bgm|配乐|音乐节奏|轻音乐|鼓点|现场音效|旁白)[^。]*。?",
+        r"【声音限制】不要生成[^。]*(?:旁白|配音|语音音轨)[^。]*。?",
+        r"不要生成[^。；]*(?:旁白|配音|语音音轨)[^。；]*(?:[。；]|$)",
+        r"不要出现[^。；]*(?:说话的人|主播|口播)[^。；]*(?:[。；]|$)",
+        r"只保留真实现场环境音[^。；]*(?:[。；]|$)",
+        r"加入一条[^。；\n]*(?:旁白|配音|口播|人声)[^。；\n]*(?:[。；\n]|$)",
+        r"声音只能由真实现场音效和一条普通话广告旁白组成[^。；\n]*(?:[。；\n]|$)",
+        r"不要(?:生成|出现|加入|使用|有)?[^。；]*(?:背景音乐|BGM|bgm|配乐|音乐节奏|轻音乐|鼓点)[^。；]*(?:[。；]|$)",
+    ]
+    for pattern in stale_blocks:
+        cleaned = re.sub(pattern, "", cleaned)
     replacements = {
         "不要出现主播": "",
         "不出现主播": "",
         "禁止主播": "",
         "无人物主播": "",
-        "主播": "产品实测动作",
+        "主播": "产品运动动作",
+        "配音": "",
+        "人声解说": "",
+        "口播": "",
+        "主播声音": "",
         "直播间": "户外自然环境",
-        "直播带货": "户外功能广告",
-        "带货": "功能展示",
+        "直播带货": "户外品牌广告",
+        "带货": "产品广告",
         "真人讲解": "产品细节展示",
         "手机下单": "产品细节定格",
         "购物车": "产品细节",
@@ -526,11 +605,94 @@ def _sanitize_storyboard_prompt_text(text: str) -> str:
         "促销": "卖点",
         "价格": "卖点",
         "CTA": "卖点",
+        "低频户外广告鼓点": "现场音效",
+        "低频鼓点": "现场音效",
+        "音乐节奏": "现场音效",
+        "轻音乐节奏": "现场音效",
+        "背景音乐": "现场音效",
+        "轻音乐": "现场音效",
+        "配乐": "现场音效",
+        "BGM": "现场音效",
+        "bgm": "现场音效",
+        "鼓点": "现场音效",
+        "防滑声": "脚步与地面摩擦声",
     }
     for source, target in replacements.items():
         cleaned = cleaned.replace(source, target)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
+
+
+_STORYBOARD_LEGACY_TERMS = (
+    "新旧",
+    "旧鞋",
+    "旧鞋底",
+    "磨损差异",
+    "并排摆放",
+    "并排",
+    "完全没有移位",
+    "湿滑瓷砖",
+    "瓷砖",
+    "实验室",
+    "硬测评",
+    "测评",
+    "打滑",
+    "防滑挑战",
+    "耐磨挑战",
+    "功能挑战",
+    "功能测试",
+    "测试画面",
+    "证明画面",
+    "证据画面",
+    "痛点反转",
+    "反差画面",
+)
+
+
+def _legacy_neutral_text(text: str) -> str:
+    value = str(text or "")
+    return re.sub(
+        r"(?:不|不要|不能|禁止|避免|杜绝|拒绝)[^。；\n]*(?:对比|反差|痛点|证明|证据|测试|挑战|旧鞋|新旧|瓷砖|实验室|测评)[^。；\n]*(?:[。；\n]|$)",
+        " ",
+        value,
+    )
+
+
+def _contains_legacy_storyboard_logic(text: str) -> bool:
+    neutral = _legacy_neutral_text(text)
+    return any(term in neutral for term in _STORYBOARD_LEGACY_TERMS)
+
+
+def _clean_model_storyboard_text(text: str, max_length: int) -> str:
+    cleaned = _clean_text(_sanitize_storyboard_prompt_text(text), max_length)
+    if _contains_legacy_storyboard_logic(cleaned):
+        return ""
+    return cleaned
+
+
+def _normalize_video_prompt_sound(text: str) -> str:
+    cleaned = _sanitize_storyboard_prompt_text(text)
+    sound_rule = "【声音规则】生成单段视频时不要旁白、配音、人声或口播；不要唱歌、吟唱、Rap、歌词化表达或音乐化念白；不要背景音乐、BGM、配乐、音乐节奏或鼓点；只保留真实现场音效，例如脚步声、风声、水花声、材质与地面轻微摩擦声。"
+    if cleaned and sound_rule not in cleaned:
+        cleaned = f"{cleaned} {sound_rule}"
+    return _clean_text(cleaned, 1400)
+
+
+WEARING_ACTION_RE = re.compile(r"(脚步|行走|奔跑|踩水|跨步|转向|跟拍|贴地|穿越|运动状态|步伐|鞋底|鞋身贴合)")
+
+
+def _requires_wearing_scene(*texts: str) -> bool:
+    return any(WEARING_ACTION_RE.search(text or "") for text in texts)
+
+
+def _ensure_wearing_image_prompt(image_prompt: str, *context_texts: str) -> str:
+    cleaned = _clean_text(image_prompt, 1200)
+    if not cleaned or not _requires_wearing_scene(cleaned, *context_texts):
+        return cleaned
+    if "穿着" in cleaned and ("真人" in cleaned or "脚部" in cleaned or "下肢" in cleaned):
+        return cleaned
+    wearing_rule = "【穿着状态】该分镜包含脚步/运动/行进动作，首帧图片必须有人穿着当前产品，画面出现真人脚部或下肢与产品的真实穿着关系；不要生成空鞋、孤立产品或静物摆拍。"
+    return _clean_text(f"{cleaned} {wearing_rule}", 1200)
 
 
 def _parse_selling_points_json(text: str) -> Any:
@@ -585,41 +747,139 @@ def _storyboard_seed(req: StoryboardPlanRequest) -> int:
     return int(hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12], 16)
 
 
+def _parse_storyboard_creative_brief(text: str) -> tuple[int | None, int | None]:
+    value = text or ""
+    count_match = re.search(r"(\d{1,2})\s*(?:段|条|个)\s*(?:分镜|镜头|视频|片段)?", value)
+    if not count_match:
+        count_match = re.search(r"(?:分镜|镜头|视频|片段)\s*(\d{1,2})\s*(?:段|条|个)?", value)
+    duration_match = re.search(r"(\d{1,2})\s*(?:s|S|秒)", value)
+    scene_count = int(count_match.group(1)) if count_match else None
+    duration = int(duration_match.group(1)) if duration_match else None
+    return scene_count, duration
+
+
 def _creative_route(seed: int) -> dict[str, str]:
     routes = [
         {
-            "name": "溪流实测",
-            "visual": "溪流浅水、湿石、苔藓、水花慢动作、低机位跟拍",
-            "tempo": "真实户外实测，动作清晰，卖点直接",
+            "name": "雨后溪谷大片",
+            "visual": "雨后溪谷、湿石反光、逆光水雾、低机位穿越、水花慢动作和产品英雄特写",
+            "tempo": "用贴地跟拍、自然脚步和水光细节营造高级户外运动广告感",
         },
         {
-            "name": "山路穿越",
-            "visual": "碎石山路、林间逆光、脚步扬起细小水珠和泥点、手持跟拍",
-            "tempo": "纪录片式户外穿越，节奏更有行进感",
+            "name": "山路穿越大片",
+            "visual": "碎石山路、林间逆光、尘土与水珠飞溅、跟拍奔走和压迫感远景",
+            "tempo": "用长镜头行进、低机位跟拍和材质微距形成高级运动节奏",
         },
         {
-            "name": "雨后岩壁",
-            "visual": "雨后岩石、深色湿润质感、微距水滴、鞋底纹路特写",
-            "tempo": "偏硬核功能证明，强调抓地和结构细节",
+            "name": "雨后岩壁硬核片",
+            "visual": "雨后岩壁、深色湿润质感、斜坡压力、水滴微距、鞋底纹理和石面摩擦特写",
+            "tempo": "用湿润质感、转向动作和慢动作水滴呈现硬朗户外气质",
         },
         {
-            "name": "清晨露营地",
-            "visual": "清晨自然光、溪边营地、木栈道、浅水边产品定格",
-            "tempo": "更生活方式广告，质感明亮干净",
+            "name": "清晨出发大片",
+            "visual": "清晨自然光、溪边营地、木栈道、浅水边出发、金色逆光和产品定格",
+            "tempo": "更像生活方式品牌广告，卖点藏在真实出行动作里",
         },
         {
-            "name": "极近微距",
-            "visual": "鞋面网眼、扣具、鞋底纹路、水滴挂珠、材质反光",
-            "tempo": "高质感微距商业摄影，强调产品细节",
+            "name": "微距质感大片",
+            "visual": "鞋面网眼、扣具、鞋底纹路、水滴挂珠、材质反光和极近景结构扫描",
+            "tempo": "用电影级微距、扫光和材质声音把卖点拍得高级、可信、可感知",
         },
     ]
     return routes[seed % len(routes)]
 
 
-def _timeline_items(raw: Any, *, name: str, title: str, hook: str, detail: str, duration: int) -> list[str]:
+def _selling_point_ad_drama(title: str, detail: str = "") -> dict[str, str]:
+    text = f"{title} {detail}"
+    cases = [
+        (
+            ("防滑", "不打滑", "抓地", "止滑", "湿滑"),
+            {
+                "scene": "雨后溪谷和湿石反光，浅水从石缝间流过，画面干净但有真实户外质感",
+                "action": "脚步贴着湿石自然向前，鞋底压过水膜，水花轻轻向两侧散开",
+                "detail": "低机位掠过鞋底纹路、湿石水珠和鞋身轮廓，抓地感通过脚步稳定性自然出现",
+                "ending": "脚步停在逆光水面边缘，产品轮廓清晰，像户外品牌主视觉",
+                "voiceover": "湿滑路面，也能从容向前。",
+            },
+        ),
+        (
+            ("防水", "拒水", "涉水", "泼水", "速干"),
+            {
+                "scene": "浅溪、雨后木栈道或潮湿山路中，逆光水雾和水珠营造清爽户外氛围",
+                "action": "产品随着脚步轻快穿过浅水，水珠沿材质表面滑落，动作干净利落",
+                "detail": "微距扫过水珠滚落、包边、接缝和材质反光，防水感自然藏在质感里",
+                "ending": "脚步离开水面，水珠在逆光里飞散，产品保持清晰有型",
+                "voiceover": "穿过潮湿，也保持清爽。",
+            },
+        ),
+        (
+            ("透气", "干爽", "排汗", "不闷", "通风"),
+            {
+                "scene": "清晨林道、山间微风和柔和逆光，空气感充足，画面轻盈干净",
+                "action": "脚步保持轻快节奏，镜头跟随鞋面掠过风和光，运动状态自然舒展",
+                "detail": "浅景深微距扫过网眼、织物层次和空气流动感，干爽透气通过画面质感呈现",
+                "ending": "人物继续向前，画面明亮通透，产品在步伐里显得轻松",
+                "voiceover": "让每一步，都更轻快。",
+            },
+        ),
+        (
+            ("缓震", "减震", "回弹", "软弹", "舒适"),
+            {
+                "scene": "碎石路、木栈道或山径坡面，晨光从侧后方打出运动轮廓",
+                "action": "脚步落地再抬起，动作连贯有弹性，水珠或细尘随落点轻轻弹开",
+                "detail": "镜头贴近中底、鞋跟落点和身体重心变化，用慢动作表现柔和回弹",
+                "ending": "连续步伐向前延伸，产品和身体动作保持轻盈节奏",
+                "voiceover": "落地轻一点，走得更远一点。",
+            },
+        ),
+        (
+            ("支撑", "稳定", "包裹", "护踝", "不崴"),
+            {
+                "scene": "山路转弯、斜坡碎石和林间逆光形成运动户外氛围",
+                "action": "人物自然转向、跨步或停顿，鞋身贴合脚步，动作稳定而不僵硬",
+                "detail": "微距扫过鞋帮、后跟、包边和包裹结构，稳定感从动作和轮廓里出来",
+                "ending": "脚步在斜坡边缘稳稳停住，画面高级克制，不做夸张测试",
+                "voiceover": "每一次转向，都稳稳跟上。",
+            },
+        ),
+        (
+            ("耐磨", "抗磨", "耐穿", "耐用", "结实"),
+            {
+                "scene": "粗粝山路、碎石、尘土和低角度自然光，画面硬朗但不测试化",
+                "action": "产品从碎石和山路表面掠过，脚步有速度，尘土轻轻被带起",
+                "detail": "镜头扫过鞋底纹路、包边、缝线和材质边缘，让耐用感藏在细节质感里",
+                "ending": "产品停在山路光影中，轮廓清晰，像刚完成一次户外行进",
+                "voiceover": "路走得越远，细节越可靠。",
+            },
+        ),
+        (
+            ("轻量", "轻便", "不累", "轻"),
+            {
+                "scene": "开阔山野、清晨风和明亮天空，画面有轻快的出发感",
+                "action": "脚步快速掠过浅水、木栈道或碎石，抬脚动作轻盈自然",
+                "detail": "慢动作呈现鞋身线条、薄厚比例和脚步离地瞬间，轻量感通过节奏体现",
+                "ending": "镜头拉出开阔空间，产品随步伐向前，画面清爽有速度",
+                "voiceover": "轻装出发，步伐自然更远。",
+            },
+        ),
+    ]
+    for keywords, drama in cases:
+        if any(keyword in text for keyword in keywords):
+            return drama
+    return {
+        "scene": f"真实运动户外环境中，自然光、风、脚步和空间感围绕“{title}”形成高级广告氛围",
+        "action": f"产品跟随自然运动动作进入画面，让“{title}”在步伐、姿态和环境互动里被感知",
+        "ending": "动作结束后产品稳稳定格，质感、结构和轮廓都像品牌广告主视觉",
+        "detail": "关键材质、结构、纹理和运动细节用电影级微距自然带出",
+        "voiceover": f"{title}，随每一步自然发生。",
+    }
+
+
+def _timeline_items(raw: Any, *, name: str, title: str, hook: str, detail: str, duration: int, drama: dict[str, str] | None = None) -> list[str]:
     items: list[str] = []
     if isinstance(raw, list):
         for item in raw[:4]:
+            raw_desc = ""
             if isinstance(item, dict):
                 time_label = _clean_text(str(item.get("time") or item.get("range") or ""), 20)
                 parts = [
@@ -629,21 +889,31 @@ def _timeline_items(raw: Any, *, name: str, title: str, hook: str, detail: str, 
                     item.get("visual") or item.get("画面"),
                     item.get("effect") or item.get("效果"),
                 ]
-                desc = _clean_text("，".join(str(part) for part in parts if part), 260)
+                raw_desc = "，".join(str(part) for part in parts if part)
+                desc = _clean_model_storyboard_text(raw_desc, 260)
                 if time_label and desc:
                     items.append(f"{time_label}：{desc}")
                 elif desc:
                     items.append(desc)
             elif isinstance(item, str):
-                line = _clean_text(item, 260)
+                raw_desc = item
+                line = _clean_model_storyboard_text(item, 260)
                 if line:
                     items.append(line)
+            if raw_desc and _contains_legacy_storyboard_logic(raw_desc):
+                items = []
+                break
     if items:
+        if duration >= 8:
+            clean_items = [re.sub(r"^\s*[^：:]{1,24}[：:]\s*", "", item).strip() for item in items]
+            continuous_scene = "；".join(part for part in clean_items if part) or f"{name}在户外动作场景中自然进入画面"
+            return [
+                f"0-{duration}秒：同一户外广告场景内连贯推进，{continuous_scene}；不要切换到第二个场景，镜头可通过推近、低机位跟随、景别变化和焦点转移自然带到产品英雄近景、材质微距或产品样式收束，结尾回到产品本身的样式、轮廓、材质和广告主视觉。",
+            ]
         return items
+    drama = drama or _selling_point_ad_drama(title, detail)
     return [
-        f"0-2秒：低机位近景，{name}进入真实山溪浅水或湿石环境，镜头直接用产品动作呈现“{hook}”。",
-        f"2-5秒：跟随镜头推进，产品完成一次清晰实测动作，用水花、湿石、苔藓或碎石把“{title}”变成可见画面。",
-        f"5-{duration}秒：微距特写切到鞋面/鞋底/扣具/纹理等关键结构，最后停在可继续衔接下一镜的产品定格。",
+        f"0-{duration}秒：一个完整连贯的高级运动户外广告镜头，{drama['scene']}；镜头压低贴近地面，{name}自然进入画面，{drama['action']}，让“{title}”通过运动状态被感知；中后段在同一场景内自然推近到产品英雄近景或材质细节，{drama['detail']}；结尾回到产品本身的样式、轮廓、材质和广告主视觉，{drama['ending']}，画面干净、可做品牌主视觉定格。",
     ]
 
 
@@ -667,23 +937,25 @@ def _veo_storyboard_scene(
     name = _clean_text(product.name, 80) or "产品"
     title = _clean_text(selling_point, 80) or f"卖点 {index + 1}"
     caption = _caption_text(hook, title)
-    route = route or {"name": "溪流实测", "visual": "真实山溪、湿石、苔藓和浅水环境", "tempo": "真实户外功能广告"}
+    drama = _selling_point_ad_drama(title, detail)
+    route = route or {"name": "雨后溪谷大片", "visual": "真实山溪、湿石、苔藓、浅水、逆光水雾和慢动作水花", "tempo": "运动感自然推进，卖点融进脚步、材质和光影"}
     frame = _clean_text(
         image_frame,
         320,
-    ) or f"{beat_name}，{route['visual']}中，{name}以低机位近景成为画面主角，突出“{title}”。"
+    ) or f"{beat_name}，{route['visual']}中，{name}以运动户外品牌片的英雄近景进入画面，卖点“{title}”通过脚步、材质、光影和环境互动自然被看见。"
     ending = _clean_text(
         ending_frame,
         220,
-    ) or f"{name}停在湿石或溪水边缘，产品轮廓清晰，画面干净无文字，可衔接下一分镜。"
+    ) or f"{drama['ending']}；{name}轮廓、材质和关键结构清晰，画面干净无文字，可衔接下一分镜。"
     sound_design = _clean_text(
         sound,
         180,
-    ) or "清晰溪水声、脚步踩水声、轻微水花声，配合有节奏的户外广告鼓点。"
-    voiceover_text = _clean_text(
-        voiceover,
-        140,
-    ) or f"{name}{title}，真实户外环境里也能稳定发挥。"
+    ) or "现场音效：溪水声、脚步踩水声、轻微水花声、鞋底摩擦湿石声；不要背景音乐、BGM、配乐、音乐节奏或鼓点。"
+    if _contains_legacy_storyboard_logic(sound_design):
+        sound_design = "现场音效：脚步声、风声、浅水声、水花声、材质与地面轻微摩擦声；不要背景音乐、BGM、配乐、音乐节奏或鼓点。"
+    voiceover_text = _clean_text(voiceover, 180) or drama["voiceover"]
+    if _contains_legacy_storyboard_logic(voiceover_text):
+        voiceover_text = drama["voiceover"]
     timeline_lines = _timeline_items(
         timeline,
         name=name,
@@ -691,26 +963,31 @@ def _veo_storyboard_scene(
         hook=caption,
         detail=detail,
         duration=duration,
+        drama=drama,
     )
     image_prompt = "\n".join([
-        "【用途】生成竖屏户外产品功能广告的单张分镜图，作为后续 Veo 视频首帧/视觉参考。",
-        f"【参考】以@产品参考图为准，保持{name}的轮廓、颜色、材质、结构、鞋面/鞋底/扣具/纹理等关键细节一致。",
-        f"【画幅】{aspect_ratio}，竖屏商业广告构图。",
+        "【用途】生成首帧图片 @图片1：竖屏户外产品广告大片的单张分镜图，作为后续视频生成首帧/视觉参考。",
+        f"【参考】产品外观完全以@产品参考图为准，保持{name}的轮廓、结构、比例、材质、鞋面/鞋底/扣具/纹理等关键细节一致；外观细节不在文字里二次发挥。",
+        f"【画幅】{aspect_ratio}，竖屏电影广告构图，产品是英雄主体，不是普通商品摆拍。",
         f"【创意路线】{route['name']}：{route['visual']}，{route['tempo']}。",
+        f"【卖点气质】场景：{drama['scene']}；动作：{drama['action']}；细节：{drama['detail']}。",
         f"【镜头】{frame}",
-        "【质感】自然光、浅景深、湿石反光、苔藓、溪水、水滴、真实户外鞋服广告摄影质感。",
-        "【画面要求】不要生成字幕、文字、价格、促销词、按钮、水印或二维码；用产品动作和环境细节表达卖点。",
+        "【质感】电影级自然光、浅景深、湿石反光、逆光水雾、水滴、尘土或水花慢动作，真实户外鞋服品牌广告大片质感。",
+        "【画面要求】不要生成字幕、文字、价格、促销词、按钮、水印或二维码；不要做对比、测评、实验化演示或硬性证明；用运动状态、产品动作、材质细节和光影表达卖点。",
         f"【结尾帧】{ending}",
     ])
+    image_prompt = _ensure_wearing_image_prompt(image_prompt, frame, " ".join(timeline_lines), drama["action"], drama["scene"])
     video_prompt = "\n".join([
-        f"【风格】竖屏户外产品功能广告，{duration}秒，{aspect_ratio}，真实山溪/湿石/苔藓/浅水环境，自然光，低机位跟拍，微距特写，水花慢动作。",
-        f"【参考】@图片1 作为本分镜首帧和构图参考；@产品参考图用于保持{name}外观、颜色、材质、结构和细节一致。",
+        f"【技术参数】{aspect_ratio}，{duration}秒，24fps，竖屏户外产品广告大片，电影级自然光，浅景深，真实现场质感。",
+        f"【参考素材】@图片1为首帧、构图、场景、光线和动作起点，负责整段 {duration} 秒的同一广告场景；镜头可以在同一场景内自然推进到产品英雄近景、材质微距或产品样式镜头，但不能切到测试/测评/对比场景；@产品参考图只用于保持{name}外观、结构、比例、材质、鞋面/鞋底/扣具/纹理等关键细节一致，外观细节不在文字里二次发挥。",
         f"【创意路线】{route['name']}：{route['visual']}，{route['tempo']}。",
-        "【时间轴】",
+        f"【卖点表达】不要直白解释“{title}”，让它自然出现在“{drama['scene']}”里的运动动作、材质细节和户外光影中；画面要能承接后期旁白和字幕。",
+        "【时间戳分镜】",
         *timeline_lines,
-        f"【无字幕要求】全片不要出现任何字幕、屏幕文字、价格、促销词、按钮、水印或二维码；只用镜头动作、产品细节和环境音表现“{caption}”。",
-        f"【声音】{sound_design}",
-        f"【旁白】可以加入自然中文旁白音轨：“{voiceover_text}”。旁白只作为音频出现，不要生成字幕或任何屏幕文字。",
+        "【镜头节奏】这是一段完整连贯的 8 秒单场景广告镜头；可以通过推近、低机位跟随、轻微横移、景别变化和焦点转移，从户外动作自然推进到产品英雄近景、材质微距或产品样式收束，结尾内容要回到产品本身的样式、轮廓、材质和广告主视觉。",
+        f"【音效】{sound_design}；脚步、摩擦、水花、风声或材质声音要与画面动作同步。",
+        "【声音限制】生成阶段不要旁白、配音、人声、口播、唱歌、吟唱、Rap、歌词化表达或音乐化念白；不要背景音乐、BGM、配乐、音乐节奏或鼓点，只保留真实现场音效。",
+        f"【禁止项】全片不要出现任何字幕、屏幕文字、价格、促销词、按钮、水印、二维码；不要出现对比、测评、实验化演示、道具验证、硬性证明或测评感画面；不要出现说话的人、主播画面或直播带货口播；只用同一户外广告场景、产品细节和现场音效表现“{caption}”。",
         f"【结尾帧】{ending}",
     ])
     return {
@@ -720,6 +997,7 @@ def _veo_storyboard_scene(
         "hook": caption,
         "image_prompt": image_prompt,
         "video_prompt": video_prompt,
+        "voiceover_text": voiceover_text,
         "shot_notes": f"{beat_name}，约 {duration} 秒。参考产品图生成分镜图，再用分镜图作为 Veo 首帧。",
         "storyboard_image_url": "",
         "video_url": "",
@@ -743,44 +1021,44 @@ def _scene_templates(
         route_name = (route or {}).get("name", "")
         fallback_beats = {
             "山路穿越": [
-                ("林间山路入场", "碎石湿路也稳"),
-                ("逆光英雄近景", f"{title}清晰可见"),
-                ("碎石功能证明", f"{title}经得住走"),
-                ("山路细节定格", "户外行走更安心"),
+                ("林间山路入场", "脚步进入清晨山路"),
+                ("逆光英雄近景", f"{title}自然出现"),
+                ("山路运动跟拍", f"{title}融进步伐"),
+                ("山路细节定格", "风和脚步继续向前"),
             ],
             "雨后岩壁": [
-                ("雨后岩面开场", "湿石也能稳住"),
-                ("水滴英雄近景", f"{title}看得见"),
-                ("岩面抓地证明", f"{title}稳稳发挥"),
-                ("纹理微距收束", "细节经得起放大"),
+                ("雨后岩面开场", "湿石水光映出脚步"),
+                ("水滴英雄近景", f"{title}自然可感"),
+                ("岩面运动跟拍", f"{title}藏在动作里"),
+                ("纹理微距收束", "细节在水光里定格"),
             ],
             "清晨露营地": [
                 ("溪边营地开场", "出门轻松上脚"),
                 ("晨光产品近景", f"{title}清晰可见"),
-                ("浅水使用证明", f"{title}自然发挥"),
+                ("浅水步伐跟拍", f"{title}自然发挥"),
                 ("露营定格收束", "通勤露营都好搭"),
             ],
             "极近微距": [
                 ("材质微距开场", "细节一眼看清"),
                 ("结构英雄近景", f"{title}看得见"),
-                ("纹理功能证明", f"{title}经得住拍"),
+                ("纹理光影扫过", f"{title}融入质感"),
                 ("水滴定格收束", "质感细节拉满"),
             ],
         }
         beat_pool = fallback_beats.get(route_name, [
             ("溪流实测开场", "下水踩石走山路"),
             ("产品英雄近景", f"{title}看得见"),
-            ("卖点功能证明", f"{title}稳稳发挥"),
+            ("运动动作跟拍", f"{title}自然发挥"),
             ("细节定格收束", "户外出行更安心"),
         ])
     else:
         beat_pool = [
-            ("开场痛点", f"3 秒内展示用户遇到的问题，并自然引出{name}"),
-            ("产品亮相", f"完整展示{name}外观、比例和核心结构"),
-            ("卖点展开", f"围绕“{title}”展示产品带来的直接好处"),
-            ("细节证明", f"用材质、结构、接口、纹理或关键细节证明“{title}”"),
-            ("场景演示", f"把{name}放入真实使用场景，展示使用前后变化"),
-            ("收尾定格", f"回到{name}完整产品定格，留下干净的商品展示画面"),
+            ("山野氛围开场", f"用运动户外环境自然引出{name}"),
+            ("产品运动近景", f"完整展示{name}外观、比例和核心结构"),
+            ("卖点自然融入", f"让“{title}”出现在真实脚步和动作里"),
+            ("材质光影细节", f"用材质、结构、纹理和光影承接“{title}”"),
+            ("户外行动片段", f"把{name}放入真实户外动作，画面高级克制"),
+            ("品牌定格收束", f"回到{name}干净、有力量的广告主视觉"),
         ]
     beat_name, hook = beat_pool[index % len(beat_pool)]
     if scene_count == VEO_STORYBOARD_SCENE_COUNT:
@@ -795,20 +1073,24 @@ def _scene_templates(
             duration=duration,
             route=route,
         )
-    scene_style = "真实电商短视频，干净背景，产品为主体，画面适合手机竖屏投放"
+    drama = _selling_point_ad_drama(title, detail)
+    scene_style = "真实产品广告大片，电影级户外/生活场景，产品为英雄主体，画面适合手机竖屏投放"
     if aspect_ratio == "16:9":
-        scene_style = "真实电商横版视频，干净背景，产品为主体，画面适合店铺详情页和横版投放"
+        scene_style = "真实产品广告大片横版视频，电影级户外/生活场景，产品为英雄主体，画面适合横版投放"
     image_prompt = (
         f"{scene_style}。分镜阶段：{beat_name}。产品：{name}。对应卖点：{title}。"
-        f"画面要求：产品清晰可见，画面服务这个卖点，前景有使用场景或细节特写，光线明亮自然，"
-        f"构图稳定，保留电商广告质感，不出现多余文字。{product_lock_hint}"
+        f"场景：{drama['scene']}；动作：{drama['action']}。"
+        f"画面要求：产品清晰可见，前景有真实户外运动状态或材质细节，电影级自然光，构图有冲击力，"
+        f"保留品牌广告大片质感，不出现多余文字。{product_lock_hint}"
     )
     if detail:
         image_prompt += f" 参考信息：{detail}。"
+    image_prompt = _ensure_wearing_image_prompt(image_prompt, drama["action"], drama["scene"], beat_name, title)
     video_prompt = (
-        f"{duration}秒左右电商素材分镜，阶段：{beat_name}。{hook}。"
-        f"镜头必须围绕卖点“{title}”展开，保持同一产品外观与比例，"
-        f"画面真实、节奏利落、适合和其他 5 个分镜拼成一条完整产品视频。"
+        f"{duration}秒左右产品广告大片分镜，阶段：{beat_name}。{hook}。"
+        f"镜头必须把卖点“{title}”融入高级运动户外画面：{drama['scene']}；{drama['action']}；最后用{drama['detail']}承接后期字幕。"
+        f"保持同一产品外观与比例，画面真实、节奏有电影广告推进感，适合和其他分镜拼成一条完整品牌广告片。"
+        "生成阶段不要旁白、配音、人声或口播；不要唱歌、吟唱、Rap、歌词化或音乐化念白；声音只保留真实现场音效，不要背景音乐、BGM、配乐、音乐节奏或鼓点。"
     )
     if detail:
         video_prompt += f" 卖点补充：{detail}。"
@@ -819,6 +1101,7 @@ def _scene_templates(
         "hook": hook,
         "image_prompt": image_prompt,
         "video_prompt": video_prompt,
+        "voiceover_text": drama["voiceover"],
         "shot_notes": f"{beat_name}，约 {duration} 秒，服务卖点：{title}。",
         "storyboard_image_url": "",
         "video_url": "",
@@ -834,12 +1117,14 @@ def _storyboard_prompt(
     scene_count: int,
     route: dict[str, str] | None = None,
     storyboard_reference_count: int = 0,
+    creative_brief: str = "",
     creative_seed: str = "",
     regenerate_index: int = 0,
 ) -> str:
     name = _clean_text(product.name, 80) or "未命名产品"
     category = _clean_text(product.category, 80) or "电商产品"
     description = _clean_text(product.description, 500)
+    creative_brief_text = _clean_text(creative_brief, 600)
     points_text = "\n".join(
         f"{index + 1}. {point.title}：{_clean_text(point.description or point.evidence, 260)}"
         for index, point in enumerate(selling_points)
@@ -851,10 +1136,10 @@ def _storyboard_prompt(
         else "用户未额外上传分镜/场景参考图，请根据产品卖点和创意路线自行构思画面。"
     )
     if scene_count == VEO_STORYBOARD_SCENE_COUNT and duration == VEO_STORYBOARD_DURATION:
-        route = route or {"name": "溪流实测", "visual": "溪流浅水、湿石、苔藓、水花慢动作、低机位跟拍", "tempo": "真实户外实测，动作清晰，卖点直接"}
+        route = route or {"name": "溪流广告大片", "visual": "溪流浅水、湿石、苔藓、水花慢动作、低机位跟拍", "tempo": "真实户外广告片，动作自然，卖点融进画面"}
         seed_text = creative_seed or uuid.uuid4().hex
         return f"""
-你是户外装备产品广告导演、短视频商业摄影指导和 Veo 3.1 视频提示词专家。请根据产品卖点，先构思一条类似“户外鞋服功能广告”的竖屏产品广告脚本，再拆成 {scene_count} 个适合 Veo 3.1 生成的分镜。
+你是户外装备品牌广告导演、电影广告摄影指导和 Veo 3.1 视频提示词专家。请根据产品卖点，先构思一条有“广告大片感”的竖屏产品广告脚本，再拆成 {scene_count} 个适合 Veo 3.1 生成的分镜。
 
 产品名称：{name}
 产品类目：{category}
@@ -866,58 +1151,61 @@ def _storyboard_prompt(
 本次创意路线：{route["name"]} - {route["visual"]}；节奏：{route["tempo"]}
 本次重生成编号：{regenerate_index}
 创意随机种子：{seed_text}
+用户创作需求：{creative_brief_text or f"请根据上面的卖点，为我写 {scene_count} 段 {duration}s 的电商广告视频；分镜图片和视频提示词都按 Seedance 风格生成。"}
 
 已整理/已编辑的卖点：
 {points_text or "无明确卖点，请基于产品信息生成保守的产品广告片卖点。"}
 
 生成要求：
-1. 这是户外实测质感的产品广告，不是直播带货，不是主播口播，不是购买转化页面。
-2. 视觉参考方向：竖屏，溪流/湿石/苔藓/山路/浅水，自然光，低机位跟拍，水花慢动作，产品微距，鞋底/纹理/结构特写，画面真实但商业广告质感强。
-3. 先在脑中完成广告脚本：户外环境开场、产品上脚/入场、卖点功能证明、细节定格；输出时只输出分镜 JSON。
-4. 4 个分镜必须分别承担：户外实测开场、产品英雄近景、卖点功能证明、细节定格收束。
-5. 每个分镜约 {duration} 秒，适合 Veo 3.1 直接生成一段高质量 AI 视频，再拼成一条完整广告片。
-6. 每个分镜必须围绕卖点，并把卖点转成可见动作或可见细节：防滑就拍湿石抓地，透气就拍网面和水汽/空气感，支撑就拍脚跟稳定，耐磨就拍鞋底纹理和碎石摩擦。
-7. 不要直接输出散文式 image_prompt/video_prompt；请输出结构字段，后端会拼成最终提示词。
-8. image_frame 写单张分镜图画面：主体位置、景别、构图、户外环境、光线、水花/湿石/苔藓等质感。
-9. timeline 必须覆盖完整 0-8 秒，建议 0-2、2-5、5-8 三段；每段包含 time、shot、camera、action、visual。
-10. sound 写环境音/音乐节奏，例如溪水声、脚步踩水声、低频鼓点。
-11. voiceover 写一句自然中文旁白，10-24 个汉字左右，只作为音频口播，不作为画面字幕。
-12. ending_frame 写本分镜最后一帧，包含产品姿态、背景、光线、构图和是否能衔接下一分镜。
-13. hook 字段只作为内部卖点钩子，用来指导镜头动作，不要让画面出现字幕、屏幕文字、价格、购买按钮或促销 CTA。
-14. 所有输出必须是中文。
-15. 每次重生成都必须明显更换场景组合、镜头顺序、入场动作、卖点呈现方式和结尾帧，不要复用上一版分镜。优先沿“本次创意路线”构思。
+1. 这是户外品牌广告大片，单段视频生成提示词里不要旁白、配音、人声或口播；voiceover 字段只给后期统一配音和字幕使用。
+2. 不要写对比、痛点反转、测评式演示、道具验证、实验化场景或硬性证明；只拍当前这双鞋在高级户外广告场景中的状态，每个卖点都要通过运动动作、户外环境、材质细节和光影自然体现。
+3. 视觉参考方向：偏运动、偏户外的高级品牌广告片，溪流/湿石/苔藓/山路/浅水/雨后逆光/尘土/水雾，自然光，低机位英雄跟拍，水花慢动作，产品微距，鞋底/纹理/材质特写，画面真实但品牌广告质感强。
+4. 先在脑中完成广告脚本：自然户外氛围开场、产品跟随脚步进入、运动动作展开、材质光影细节、品牌主视觉收束；输出时只输出分镜 JSON。
+5. 4 个分镜必须分别承担：山野氛围开场、产品运动近景、动作中的卖点呈现、品牌质感收束。
+6. 每个分镜约 {duration} 秒，适合 Veo 3.1 直接生成一段高质量 AI 视频，再拼成一条完整广告大片。
+7. 每个分镜必须围绕卖点，但卖点只作为画面气质和动作设计的方向：防滑可以是湿石上自然稳定的步伐；防水可以是水珠从材质表面滑落；透气可以是清晨风和轻快脚步；支撑可以是山路转向时的稳定姿态；耐磨可以是碎石路上的运动质感。所有表达都只出现当前产品，不出现旧产品、对照物或测试道具。
+8. 不要直接输出散文式 image_prompt/video_prompt；请输出结构字段，后端会拼成最终提示词。
+9. image_frame 写首帧图片 @图片1 的画面：产品英雄主体、景别、构图、户外环境、电影光线、水花/湿石/苔藓/尘土/水雾/清晨风等质感，必须能和视频开头自然衔接；不要在文字里二次发挥鞋身外观细节，产品外观由参考图决定。
+10. 如果 timeline/video_prompt 要求人穿着产品运动、脚步、行走、奔跑、踩水、转向、贴地跟拍或户外行进，那么 image_frame 也必须明确写真人脚部/下肢穿着当前产品，保持真实穿着关系；不要写成空鞋、孤立产品或静物摆拍。
+11. 每一段 8 秒分镜就是一个完整连贯的单场景广告镜头。timeline 只写一条 0-8秒，或写同一场景内的镜头推进，但必须保持同一地点、同一光线和同一产品动作逻辑；结尾内容要回到产品本身的样式、轮廓、材质和广告主视觉，不要写成测试/测评/对比场景。
+12. sound 只写真实现场音效，并与画面动作对应，例如溪水声、脚步踩水声、水花声、鞋底摩擦湿石声、风声、布料摩擦声；不要写背景音乐、BGM、配乐、音乐节奏或鼓点。
+13. voiceover 写一句最终合成时使用的普通话广告旁白，12-24字，用引号包裹时也成立，要像品牌广告片文案，由同一种干净克制的普通话声音自然说出来；不要唱歌、吟唱、Rap、歌词化表达、价格促销、购买引导、直播口播或主播出镜。
+14. ending_frame 写本分镜最后一帧，包含产品姿态、背景、光线、构图和是否能衔接下一分镜，必须像品牌广告主视觉。
+15. hook 字段只作为内部卖点钩子，用来指导镜头动作，不要让画面出现字幕、屏幕文字、价格、购买按钮或促销 CTA。
+16. 所有输出必须是中文。
+17. 每次重生成都必须明显更换场景组合、镜头顺序、入场动作、卖点呈现方式和结尾帧，不要复用上一版分镜。优先沿“本次创意路线”构思。
+18. 必须优先满足“用户创作需求”；如果用户写了“6段5s”，就输出 6 个分镜、每个分镜围绕 5 秒节奏书写，除非当前视频模型有固定时长限制。
 
 质量要求：
-- 镜头语言必须具体：低机位跟拍、推镜头、横移、微距特写、手持轻微晃动、慢动作水花等。
+- 镜头语言必须具体且有大片感：低机位英雄跟拍、贴地运动近景、推镜头、横移、材质微距、手持轻微晃动、慢动作水花/尘土/水雾、逆光轮廓光。
 - 如果有分镜/场景参考图，必须吸收其构图、场景、光线、机位和广告质感，但不能把参考图里的无关产品替换成当前产品。
-- 每个分镜只表达一个核心动作，不要塞入多个不连续动作。
+- 每个分镜只围绕一个核心卖点气质，不要塞入多个不连续动作；不能平铺直叙地说功能，必须让画面自然承载卖点并能配得上后期旁白字幕。
 - 产品一致性必须通过“@产品参考图”来维持，但 JSON 里只写结构字段。
-- 不要在 image_frame/timeline/sound/ending_frame 中写禁止词或负面提示。
+- 提示词最终会按“技术参数、参考素材、时间戳分镜、现场音效、禁止项”拼接；voiceover 会作为独立后期配音/字幕字段保存，不能出现在 video_prompt 里。
+- image_frame 负责整段视频的首帧、场景、光线和动作起点；timeline 保持单场景连贯推进，可以从户外动作自然推进到产品英雄近景、材质微距或更高级的户外产品收束，但不要切到第二个场景，也不要切到测试/测评/对比场景。不要在 image_frame/timeline/sound/ending_frame 中写禁止词或负面提示，禁止项由后端统一追加。
 
 只返回严格 JSON object，不要 Markdown，不要解释。格式：
 {{
   "ad_concept": "一句话户外功能广告创意概念",
   "scenes": [
     {{
-      "title": "1. 户外实测开场：短标题",
+      "title": "1. 户外广告开场：短标题",
       "selling_point": "对应卖点",
       "hook": "6-10 字内部卖点钩子，不要作为画面字幕",
-      "image_frame": "单张分镜图画面描述",
+      "image_frame": "首帧图片@图片1画面描述",
       "timeline": [
-        {{"time": "0-2秒", "shot": "景别", "camera": "运镜", "action": "动作", "visual": "画面细节"}},
-        {{"time": "2-5秒", "shot": "景别", "camera": "运镜", "action": "动作", "visual": "画面细节"}},
-        {{"time": "5-8秒", "shot": "景别", "camera": "运镜", "action": "动作", "visual": "画面细节"}}
+        {{"time": "0-8秒", "shot": "景别", "camera": "运镜", "action": "同一户外场景内的连贯动作", "visual": "户外氛围、卖点画面细节和产品样式收束"}}
       ],
       "sound": "声音设计",
-      "voiceover": "一句自然中文旁白，只作为音频，不作为字幕",
+      "voiceover": "一句中文旁白",
       "ending_frame": "结尾帧描述"
     }}
   ]
 }}
 """.strip()
-    beat_description = "6 个分镜：开场痛点、产品亮相、卖点展开、细节证明、场景演示、收尾定格"
+    beat_description = "6 个分镜：山野氛围开场、产品运动近景、动作中的卖点呈现、材质光影细节、户外行动片段、品牌定格收束"
     return f"""
-你是资深电商短视频导演和 AI 视频分镜提示词专家。请根据产品卖点，为同一个产品生成一条完整短视频的 {scene_count} 个分镜。
+你是资深产品广告大片导演和 AI 视频分镜提示词专家。请根据产品卖点，为同一个产品生成一条完整广告大片的 {scene_count} 个分镜。
 
 产品名称：{name}
 产品类目：{category}
@@ -926,29 +1214,33 @@ def _storyboard_prompt(
 单个分镜时长：约 {duration} 秒
 产品一致性要求：{detail_sheet_note}
 分镜参考图要求：{storyboard_reference_note}
+用户创作需求：{creative_brief_text or f"请根据上面的卖点，为我写 {scene_count} 段 {duration}s 的电商广告视频；分镜图片和视频提示词都按 Seedance 风格生成。"}
 
 已整理/已编辑的卖点：
 {points_text or "无明确卖点，请基于产品信息生成保守的电商卖点分镜。"}
 
 生成要求：
-1. 必须围绕卖点制作场景与分镜，不要泛泛写产品展示。
+1. 必须围绕卖点制作场景与分镜，不要泛泛写产品展示；卖点要自然融入运动动作、户外环境、材质细节和光影，不要写成对比、痛点反转、功能测试、硬性证明或说明书。
 2. 默认节奏为 {beat_description}；如果 scene_count 与默认节奏不同，也要保持完整起承转合。
 3. 每个分镜约 {duration} 秒，适合后续分别调用视频模型生成，再拼成一条完整产品视频。
-4. 每个分镜只能表达一个清晰画面，不要把多个镜头动作塞进同一条。
-5. image_prompt 要适合图片模型生成分镜图，必须描述画面、构图、产品位置、光线和场景。
-6. video_prompt 要适合视频模型生成 5 秒左右片段，必须描述镜头运动、动作节奏、产品一致性和卖点呈现。
+4. 每个分镜只围绕一个核心卖点气质，不要把多个镜头动作塞进同一条；画面要高级、克制、偏运动偏户外。
+5. image_prompt 要适合图片模型生成广告大片首帧/分镜图，必须描述电影构图、产品英雄位置、户外环境、自然光线、材质质感和运动氛围；首帧要能作为 @图片1 被视频提示词引用；不要在文字里二次发挥鞋身外观细节，产品外观由参考图决定。
+6. video_prompt 要适合 Seedance/视频模型生成 5 秒左右片段，必须用自然中文写清楚技术参数、@图片1首帧/产品参考用途、时间戳画面、运镜、动作节奏、现场音效和禁止项；视频画面必须延续 image_prompt 的同一场景、同一光线和同一动作起点，不能另起一个对比/测试场景；声音规则必须写明生成阶段不要旁白、配音、人声或口播，不要背景音乐、BGM、配乐、音乐节奏或鼓点，只允许真实现场音效。
 7. 不要生成价格、促销词、二维码、水印、虚假认证、夸大医疗/功效承诺。
-8. 所有输出必须是中文。
+8. 必须优先满足“用户创作需求”；如果用户写了“6段5s”，就输出 6 个分镜、每个分镜围绕 5 秒节奏书写；如果用户要求广告大片、电商广告、户外实测、生活方式等风格，要体现在 image_prompt 和 video_prompt 里。
+9. 不要使用“对比、反差、痛点、证明、证据、测试、挑战”作为分镜核心结构；不要出现实验化测评或道具验证画面；可以有真实路况和动作，但不要把它写成硬测评。
+10. 所有输出必须是中文。
 
 只返回严格 JSON object，不要 Markdown，不要解释。格式：
 {{
   "scenes": [
     {{
-      "title": "1. 开场痛点：短标题",
+      "title": "1. 山野氛围：短标题",
       "selling_point": "对应卖点",
       "hook": "这个分镜的画面钩子",
       "image_prompt": "分镜图提示词",
       "video_prompt": "视频提示词",
+      "voiceover": "最终配音/字幕旁白",
       "shot_notes": "约 {duration} 秒，镜头说明"
     }}
   ]
@@ -998,7 +1290,11 @@ def _normalize_storyboard_scenes(
                 break
             continue
         image_prompt = _clean_text(_sanitize_storyboard_prompt_text(str(item.get("image_prompt") or item.get("imagePrompt") or item.get("storyboard_prompt") or "")), 1200)
-        video_prompt = _clean_text(_sanitize_storyboard_prompt_text(str(item.get("video_prompt") or item.get("videoPrompt") or item.get("prompt") or "")), 1200)
+        video_prompt = _normalize_video_prompt_sound(str(item.get("video_prompt") or item.get("videoPrompt") or item.get("prompt") or ""))
+        image_prompt = _ensure_wearing_image_prompt(image_prompt, video_prompt, hook, selling_point, title)
+        voiceover_text = _clean_text(str(item.get("voiceover") or item.get("voiceover_text") or item.get("voiceoverText") or item.get("narration") or item.get("旁白") or ""), 180)
+        if not voiceover_text or _contains_legacy_storyboard_logic(voiceover_text):
+            voiceover_text = _selling_point_ad_drama(selling_point or title, "").get("voiceover", "")
         shot_notes = _clean_text(str(item.get("shot_notes") or item.get("shotNotes") or item.get("notes") or ""), 220)
         if not image_prompt or not video_prompt:
             continue
@@ -1010,6 +1306,7 @@ def _normalize_storyboard_scenes(
                 "hook": hook,
                 "image_prompt": image_prompt,
                 "video_prompt": video_prompt,
+                "voiceover_text": voiceover_text,
                 "shot_notes": shot_notes or f"约 {duration} 秒，围绕卖点完成单一镜头。",
                 "storyboard_image_url": "",
                 "video_url": "",
@@ -1039,6 +1336,7 @@ async def _generate_model_storyboard(
         scene_count=count,
         route=route,
         storyboard_reference_count=len(req.storyboard_reference_urls or []),
+        creative_brief=req.creative_brief,
         creative_seed=req.creative_seed,
         regenerate_index=req.regenerate_index,
     )
@@ -1064,6 +1362,665 @@ def _model_provider(model_id: str, models: list[dict[str, Any]], fallback: str) 
     return fallback
 
 
+def _ffmpeg_exe() -> str:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        return ffmpeg
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as exc:
+        raise RuntimeError("当前环境缺少 ffmpeg，无法合成完整视频。") from exc
+
+
+def _target_video_size(aspect_ratio: str) -> tuple[int, int]:
+    value = (aspect_ratio or "9:16").strip()
+    if value == "16:9":
+        return 1280, 720
+    if value == "1:1":
+        return 1080, 1080
+    if value == "4:3":
+        return 960, 720
+    if value == "3:4":
+        return 810, 1080
+    return 720, 1280
+
+
+def _drawtext_escape(text: str) -> str:
+    value = _clean_text(text, 120)
+    value = value.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+    value = value.replace("%", "\\%").replace("[", "\\[").replace("]", "\\]")
+    value = value.replace("\n", "\\n")
+    return value or " "
+
+
+def _wrap_subtitle_text(text: str, *, width: int) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    if not cleaned:
+        return ""
+    max_chars = 11 if width <= 720 else 16
+    max_lines = 3 if width <= 720 else 2
+    chunks = [part.strip() for part in re.findall(r".+?[，。；、,.!?！？]|.+$", cleaned) if part.strip()]
+    lines: list[str] = []
+    for chunk in chunks:
+        while len(chunk) > max_chars + 2:
+            lines.append(chunk[:max_chars])
+            chunk = chunk[max_chars:]
+        if chunk:
+            if lines and len(lines[-1]) + len(chunk) <= max_chars and len(lines) < max_lines:
+                lines[-1] += chunk
+            else:
+                lines.append(chunk)
+    lines = lines[:max_lines]
+    if len(lines) == max_lines and sum(len(line) for line in lines) < len(cleaned):
+        lines[-1] = f"{lines[-1].rstrip('，,。；;、')}..."
+    return "\n".join(lines)
+
+
+def _ffmpeg_filter_arg(value: str) -> str:
+    return value.replace("\\", "/")
+
+
+def _drawtext_font_path_arg(value: str) -> str:
+    return value.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+
+
+def _subtitle_font_file() -> str:
+    candidates = [
+        os.environ.get("BATCH_VIDEO_SUBTITLE_FONT_FILE", ""),
+        os.environ.get("SUBTITLE_FONT_FILE", ""),
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\msyhbd.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+        r"C:\Windows\Fonts\simsun.ttc",
+        r"C:\Windows\Fonts\Deng.ttf",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    ]
+    for candidate in candidates:
+        candidate = str(candidate or "").strip()
+        if candidate and Path(candidate).exists():
+            return _drawtext_font_path_arg(candidate)
+    return ""
+
+
+def _run_ffmpeg(cmd: list[str]) -> None:
+    creationflags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+    completed = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        creationflags=creationflags,
+        timeout=600,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+        message = detail[-1] if detail else "ffmpeg 合成失败"
+        raise RuntimeError(message[:500])
+
+
+def _ffprobe_exe(ffmpeg: str = "") -> str:
+    name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+    if ffmpeg:
+        try:
+            candidate = Path(ffmpeg).with_name(name)
+            if candidate.exists():
+                return str(candidate)
+        except (OSError, ValueError):
+            pass
+    return shutil.which(name) or shutil.which("ffprobe") or ""
+
+
+def _media_duration_seconds_sync(ffmpeg: str, input_path: Path) -> float | None:
+    creationflags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+    ffprobe = _ffprobe_exe(ffmpeg)
+    if ffprobe:
+        completed = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(input_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            creationflags=creationflags,
+            timeout=30,
+        )
+        if completed.returncode == 0:
+            try:
+                duration = float((completed.stdout or "").strip().splitlines()[0])
+            except (IndexError, TypeError, ValueError):
+                duration = 0.0
+            if duration > 0:
+                return duration
+
+    completed = subprocess.run(
+        [ffmpeg, "-hide_banner", "-i", str(input_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        creationflags=creationflags,
+        timeout=30,
+    )
+    detail = f"{completed.stderr or ''}\n{completed.stdout or ''}"
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", detail)
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    try:
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    except ValueError:
+        return None
+
+
+def _prepare_video_segment_sync(
+    ffmpeg: str,
+    input_path: Path,
+    output_path: Path,
+    *,
+    width: int,
+    height: int,
+    subtitle: str,
+    subtitle_enabled: bool,
+    start_time: float | None = None,
+    end_time: float | None = None,
+) -> None:
+    start = max(0.0, float(start_time or 0.0))
+    end = max(0.0, float(end_time or 0.0)) if end_time is not None else 0.0
+    duration = end - start if end > start else 0.0
+    video_filter = (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
+        "setsar=1,fps=30"
+    )
+    if subtitle_enabled and subtitle:
+        text = _drawtext_escape(_wrap_subtitle_text(subtitle, width=width))
+        font_file = _subtitle_font_file()
+        font_part = f"fontfile='{font_file}':" if font_file else "font='Microsoft YaHei':"
+        font_size = max(20, round(width * 0.036))
+        box_border = max(8, round(width * 0.014))
+        line_spacing = max(4, round(font_size * 0.24))
+        video_filter += (
+            f",drawtext={font_part}text='{text}':x=(w-text_w)/2:y=h*0.67-text_h/2"
+            f":fontsize={font_size}:fontcolor=white"
+            f":line_spacing={line_spacing}"
+            f":box=1:boxcolor=black@0.48:boxborderw={box_border}"
+        )
+    cmd = [
+        ffmpeg,
+        "-y",
+    ]
+    if start > 0:
+        cmd.extend(["-ss", f"{start:.3f}"])
+    cmd.extend([
+        "-i",
+        str(input_path),
+    ])
+    if duration > 0:
+        cmd.extend(["-t", f"{duration:.3f}"])
+    cmd.extend([
+        "-vf",
+        video_filter,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+        str(output_path),
+    ])
+    _run_ffmpeg(cmd)
+
+
+def _prepare_poster_segment_sync(
+    ffmpeg: str,
+    input_path: Path,
+    output_path: Path,
+    *,
+    width: int,
+    height: int,
+    duration: float,
+) -> None:
+    safe_duration = max(0.5, min(9.0, float(duration or 2.0)))
+    video_filter = (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
+        "setsar=1,fps=30"
+    )
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-loop",
+        "1",
+        "-i",
+        str(input_path),
+        "-t",
+        f"{safe_duration:.3f}",
+        "-vf",
+        video_filter,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+        str(output_path),
+    ]
+    _run_ffmpeg(cmd)
+
+
+def _concat_videos_sync(ffmpeg: str, prepared_paths: list[Path], list_path: Path, output_path: Path) -> None:
+    list_text = "".join(f"file '{_ffmpeg_filter_arg(str(path))}'\n" for path in prepared_paths)
+    list_path.write_text(list_text, "utf-8")
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_path),
+        "-c",
+        "copy",
+        str(output_path),
+    ]
+    _run_ffmpeg(cmd)
+
+
+def _concat_videos_with_poster_transition_sync(
+    ffmpeg: str,
+    main_paths: list[Path],
+    poster_path: Path,
+    list_path: Path,
+    output_path: Path,
+    *,
+    main_duration: float,
+    transition_duration: float = POSTER_TRANSITION_DURATION,
+) -> None:
+    if not main_paths:
+        shutil.copyfile(poster_path, output_path)
+        return
+
+    main_video_path = output_path.with_name(f"{output_path.stem}_main.mp4")
+    _concat_videos_sync(ffmpeg, main_paths, list_path, main_video_path)
+    duration = max(0.15, min(float(transition_duration or 0.45), 0.8, max(0.15, main_duration / 2)))
+    poster_fade_path = output_path.with_name(f"{output_path.stem}_poster_fade.mp4")
+    fade_cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(poster_path),
+        "-vf",
+        f"fade=t=in:st=0:d={duration:.3f},format=yuv420p",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+        str(poster_fade_path),
+    ]
+    _run_ffmpeg(fade_cmd)
+    filter_complex = (
+        "[0:v]setpts=PTS-STARTPTS,fps=30[v0];"
+        "[1:v]setpts=PTS-STARTPTS,fps=30[v1];"
+        "[v0][v1]concat=n=2:v=1:a=0,format=yuv420p[v]"
+    )
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(main_video_path),
+        "-i",
+        str(poster_fade_path),
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[v]",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+        str(output_path),
+    ]
+    _run_ffmpeg(cmd)
+
+
+def _concat_audio_sync(ffmpeg: str, audio_paths: list[Path], list_path: Path, output_path: Path) -> None:
+    list_text = "".join(f"file '{_ffmpeg_filter_arg(str(path))}'\n" for path in audio_paths)
+    list_path.write_text(list_text, "utf-8")
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_path),
+        "-c:a",
+        "aac",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-b:a",
+        "160k",
+        str(output_path),
+    ]
+    _run_ffmpeg(cmd)
+
+
+def _fit_audio_to_duration_sync(ffmpeg: str, input_path: Path, output_path: Path, duration: float | None) -> None:
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(input_path),
+    ]
+    if duration and duration > 0.1:
+        cmd.extend(["-af", "apad", "-t", f"{float(duration):.3f}"])
+    cmd.extend([
+        "-c:a",
+        "aac",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-b:a",
+        "160k",
+        str(output_path),
+    ])
+    _run_ffmpeg(cmd)
+
+
+def _safe_volume(value: float | None, fallback: float) -> float:
+    try:
+        volume = float(value)
+    except (TypeError, ValueError):
+        volume = fallback
+    return max(0.0, min(3.0, volume))
+
+
+def _segment_clip_duration(item: FinalVideoSegment) -> float:
+    try:
+        start = max(0.0, float(item.start_time or 0.0))
+        end = max(0.0, float(item.end_time or 0.0)) if item.end_time is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+    return end - start if end > start else 0.0
+
+
+def _poster_duration_for_voiceover(audio_duration: float | None, fallback: float) -> float:
+    try:
+        base_duration = float(audio_duration or 0.0)
+    except (TypeError, ValueError):
+        base_duration = 0.0
+    if base_duration <= 0:
+        base_duration = float(fallback or 2.0)
+    return max(2.0, min(8.0, base_duration + 0.35))
+
+
+def _voiceover_with_product_name(text: str, product_name: str) -> str:
+    cleaned = _clean_text(text, 180)
+    name = _clean_text(product_name, 60)
+    if not name or name in cleaned:
+        return cleaned
+    if not cleaned:
+        return f"{name}，为户外每一步而来。"
+    return f"{name}，{cleaned}"
+
+
+def _poster_voiceover_text(product_name: str, *, product_name_spoken: bool = False) -> str:
+    name = _clean_text(product_name, 60)
+    suffix = "为户外每一步而来。"
+    if name and not product_name_spoken:
+        return f"{name}，{suffix}"
+    return suffix if name else ""
+
+
+def _is_product_detail_final_segment(item: FinalVideoSegment) -> bool:
+    marker = " ".join([
+        item.reference_mode or "",
+        item.scene_id or "",
+        item.title or "",
+    ]).lower()
+    return "product_detail" in marker or "产品细节收尾" in marker
+
+
+def _voiceover_for_final_segment(text: str, product_name: str, *, product_name_only: bool) -> str:
+    cleaned = _clean_text(text, 180)
+    name = _clean_text(product_name, 60)
+    if product_name_only and name:
+        return name
+    return cleaned
+
+
+def _silent_audio_sync(ffmpeg: str, output_path: Path, duration: float) -> None:
+    safe_duration = max(0.1, float(duration or 0.1))
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=channel_layout=stereo:sample_rate=44100",
+        "-t",
+        f"{safe_duration:.3f}",
+        "-c:a",
+        "aac",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-b:a",
+        "160k",
+        str(output_path),
+    ]
+    _run_ffmpeg(cmd)
+
+
+def _extract_segment_audio_sync(
+    ffmpeg: str,
+    input_path: Path,
+    output_path: Path,
+    *,
+    start_time: float | None,
+    end_time: float | None,
+    duration: float,
+) -> None:
+    safe_duration = max(0.1, float(duration or 0.1))
+    start = max(0.0, float(start_time or 0.0))
+    cmd = [ffmpeg, "-y"]
+    if start > 0:
+        cmd.extend(["-ss", f"{start:.3f}"])
+    cmd.extend(["-i", str(input_path), "-t", f"{safe_duration:.3f}"])
+    cmd.extend([
+        "-vn",
+        "-af",
+        "apad",
+        "-t",
+        f"{safe_duration:.3f}",
+        "-c:a",
+        "aac",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-b:a",
+        "160k",
+        str(output_path),
+    ])
+    try:
+        _run_ffmpeg(cmd)
+    except RuntimeError:
+        _silent_audio_sync(ffmpeg, output_path, safe_duration)
+
+
+def _generate_drum_bgm_sync(output_path: Path, duration: float, sample_rate: int = 44100) -> None:
+    safe_duration = max(0.1, float(duration or 0.1))
+    frame_count = max(1, int(safe_duration * sample_rate))
+    beat_interval = max(1, int(sample_rate * 0.5))
+    hat_interval = max(1, int(sample_rate * 0.25))
+    kick_frames = max(1, int(sample_rate * 0.16))
+    hat_frames = max(1, int(sample_rate * 0.035))
+
+    with wave.open(str(output_path), "wb") as wav_file:
+        wav_file.setnchannels(2)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        chunk = bytearray()
+        max_chunk_bytes = sample_rate * 4
+        for index in range(frame_count):
+            kick = 0.0
+            beat_pos = index % beat_interval
+            if beat_pos < kick_frames:
+                t = beat_pos / sample_rate
+                progress = beat_pos / kick_frames
+                freq = 92.0 - 38.0 * progress
+                kick = math.sin(2 * math.pi * freq * t) * math.exp(-28.0 * t) * 0.85
+
+            hat = 0.0
+            hat_pos = index % hat_interval
+            if hat_pos < hat_frames:
+                noise = ((((index * 1103515245) + 12345) >> 16) & 0x7FFF) / 16384.0 - 1.0
+                hat = noise * math.exp(-180.0 * (hat_pos / sample_rate)) * 0.1
+
+            value = max(-1.0, min(1.0, kick + hat))
+            sample = int(value * 32767)
+            chunk.extend(struct.pack("<hh", sample, sample))
+            if len(chunk) >= max_chunk_bytes:
+                wav_file.writeframes(chunk)
+                chunk.clear()
+        if chunk:
+            wav_file.writeframes(chunk)
+
+
+def _fit_bgm_to_duration_sync(ffmpeg: str, input_path: Path, output_path: Path, duration: float) -> None:
+    safe_duration = max(0.1, float(duration or 0.1))
+    fade_out_start = max(0.0, safe_duration - 0.65)
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-stream_loop",
+        "-1",
+        "-i",
+        str(input_path),
+        "-t",
+        f"{safe_duration:.3f}",
+        "-vn",
+        "-af",
+        f"afade=t=in:st=0:d=0.25,afade=t=out:st={fade_out_start:.3f}:d=0.6",
+        "-c:a",
+        "aac",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-b:a",
+        "192k",
+        str(output_path),
+    ]
+    _run_ffmpeg(cmd)
+
+
+def _mix_audio_tracks_sync(
+    ffmpeg: str,
+    tracks: list[tuple[Path, float]],
+    output_path: Path,
+    *,
+    duration: float | None = None,
+) -> None:
+    active_tracks = [(path, _safe_volume(volume, 1.0)) for path, volume in tracks if path.exists()]
+    if not active_tracks:
+        _silent_audio_sync(ffmpeg, output_path, float(duration or 0.1))
+        return
+    if len(active_tracks) == 1:
+        path, volume = active_tracks[0]
+        cmd = [ffmpeg, "-y", "-i", str(path), "-af", f"volume={volume}"]
+        if duration and duration > 0.1:
+            cmd.extend(["-t", f"{float(duration):.3f}"])
+        cmd.extend(["-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "192k", str(output_path)])
+        _run_ffmpeg(cmd)
+        return
+
+    cmd = [ffmpeg, "-y"]
+    for path, _volume in active_tracks:
+        cmd.extend(["-i", str(path)])
+    filters: list[str] = []
+    labels: list[str] = []
+    for index, (_path, volume) in enumerate(active_tracks):
+        label = f"a{index}"
+        filters.append(f"[{index}:a]volume={volume}[{label}]")
+        labels.append(f"[{label}]")
+    filters.append(
+        f"{''.join(labels)}amix=inputs={len(active_tracks)}:duration=longest:dropout_transition=0:normalize=0,"
+        "alimiter=limit=0.95[mix]"
+    )
+    cmd.extend(["-filter_complex", ";".join(filters), "-map", "[mix]"])
+    if duration and duration > 0.1:
+        cmd.extend(["-t", f"{float(duration):.3f}"])
+    cmd.extend(["-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "192k", str(output_path)])
+    _run_ffmpeg(cmd)
+
+
+def _mux_video_audio_sync(ffmpeg: str, video_path: Path, audio_path: Path, output_path: Path) -> None:
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(video_path),
+        "-i",
+        str(audio_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-b:a",
+        "160k",
+        str(output_path),
+    ]
+    _run_ffmpeg(cmd)
+
+
 def _product_reconstruction_prompt(product: ProductInput) -> str:
     name = _clean_text(product.name, 80) or "产品"
     category = _clean_text(product.category, 80) or "电商产品"
@@ -1077,18 +2034,45 @@ def _product_reconstruction_prompt(product: ProductInput) -> str:
         f"产品名称：{name}\n"
         f"产品类目：{category}\n"
         f"{detail}"
-        "输出为一张 16:9 高清产品结构参考表，白底或浅灰工作室背景，六宫格或清晰分区排版，每个视图都完整、不裁切、无遮挡。\n"
-        "必须包含 6 个分区：\n"
+        "输出为一张 16:9 高清产品结构参考表，白底或浅灰工作室背景，必须使用 2 行 x 4 列的八宫格排版；每个视图都完整、不裁切、无遮挡。\n"
+        "八宫格标题必须固定且清晰可读，严禁把左侧视图和右侧视图合并成一个“侧视图”，严禁出现单独名为“侧视图”的格子。\n"
+        "必须包含 8 个分区，按从左到右、从上到下排列：\n"
         "1. 正视图：产品居中完整展示，保持参考图中的正面轮廓、鞋头/开口/鞋带或主要结构，不能拉宽、变短或改配色；\n"
-        "2. 侧视图：以参考图中最清楚的侧面图为强参考，保持鞋身高度、鞋底厚度、logo/文字位置、色块边界、鞋跟和鞋头比例；\n"
-        "3. 俯视图：展示顶部开口、鞋舌/鞋带/扣具/鞋面纹理。参考图看不到的部分只做保守补全，不能凭空增加新结构；\n"
-        "4. 仰视图：展示鞋底或底部结构，花纹必须与参考图中的鞋底齿形、分区和颜色逻辑一致；看不清时生成合理但克制的同款底纹，不要夸张越野齿；\n"
-        "5. 细节特写：只截取参考图中真实存在的关键细节，例如鞋面网布、缝线、包边、logo 区域、鞋底纹路、扣具或材质纹理；\n"
-        "6. 信息摘要区：只写短标签，不要编造品牌、型号、参数或宣传语。可写“正视图 / 侧视图 / 俯视图 / 仰视图 / 细节特写 / 材质参考”。\n"
+        "2. 左侧视图：展示产品左侧完整轮廓，以参考图中可见的左侧或最接近左侧的侧面信息为强参考，保持鞋身高度、鞋底厚度、logo/文字位置、色块边界、鞋跟和鞋头比例；\n"
+        "3. 右侧视图：展示产品右侧完整轮廓，以参考图中可见的右侧或最接近右侧的侧面信息为强参考；如果参考图只提供一侧，另一侧只能做保守镜像/合理补全，不能改成另一款产品；\n"
+        "4. 俯视图：展示顶部开口、鞋舌/鞋带/扣具/鞋面纹理。参考图看不到的部分只做保守补全，不能凭空增加新结构；\n"
+        "5. 仰视图：展示鞋底或底部结构，花纹必须与参考图中的鞋底齿形、分区和颜色逻辑一致；看不清时生成合理但克制的同款底纹，不要夸张越野齿；\n"
+        "6. 细节特写：只截取参考图中真实存在的关键细节，例如鞋面网布、缝线、包边、logo 区域、鞋底纹路、扣具或材质纹理；\n"
+        "7. 信息摘要区：只写短标签，不要编造品牌、型号、参数或宣传语。可写“正视图 / 左侧视图 / 右侧视图 / 俯视图 / 仰视图 / 细节特写 / 材质参考”。\n"
+        "8. 材质与结构辅助区：展示鞋面材质、鞋底齿形、logo 区域、色块边界或扣具/鞋带等小细节拼图，只能来自参考图真实可见信息。\n"
         "文字规则：如果参考图里的 logo 或品牌字母清晰可见，就尽量保持其位置和形状；如果看不清，不要编造新的品牌名、型号名、英文单词或中文营销文案，宁可留空或用简短标签。\n"
-        "一致性规则：所有分区必须是同一个产品、同一配色、同一材质、同一结构、同一比例；正视图、侧视图、俯视图、仰视图之间不能像不同款式。\n"
+        "一致性规则：所有分区必须是同一个产品、同一配色、同一材质、同一结构、同一比例；正视图、左侧视图、右侧视图、俯视图、仰视图之间不能像不同款式，左右侧视图也不能互相矛盾。\n"
         "禁止：改变产品品类、改变主配色、重画 logo、生成多款不同产品、添加无关配件、增加不存在的装饰、卡通化、过度磨皮、强透视变形、拼贴错位、水印、二维码、价格、促销标签、夸张广告字。\n"
         "输出要求：真实电商产品结构参考图，清晰、克制、专业，适合后续作为分镜图和视频生成的统一产品参考。"
+    )
+
+
+def _product_poster_prompt(product: ProductInput, selling_points: list[SellingPoint]) -> str:
+    name = _clean_text(product.name, 80) or "产品"
+    category = _clean_text(product.category, 80) or "户外运动产品"
+    description = _clean_text(product.description, 260)
+    selling_text = "；".join(
+        _clean_text(point.title or point.description, 36)
+        for point in selling_points[:4]
+        if (point.title or point.description or "").strip()
+    )
+    detail_note = "参考图包含产品完整形态详情表，海报中的产品必须严格以该图为准。" if product.detail_sheet_url else "海报中的产品必须严格以用户上传的产品参考图为准。"
+    return (
+        "任务：基于参考图制作一张电商广告收尾产品海报，用作短视频结尾定格画面。\n"
+        f"产品名称：{name}\n"
+        f"产品类目：{category}\n"
+        f"产品补充信息：{description}\n"
+        f"核心卖点：{selling_text or '户外运动、稳定可靠、质感高级'}\n"
+        f"产品一致性：{detail_note} 不要重新设计产品，不要改变轮廓、比例、材质、配色、logo/文字位置和鞋底结构。\n"
+        "画面风格：高级运动户外品牌广告大片的结尾主视觉，干净、有质感、有冲击力；产品清晰完整，像正式电商广告海报，不像结构表、不像说明书、不像直播截图。\n"
+        "构图要求：9:16 竖版海报，产品为绝对主角，画面下半部分或中心偏下有稳定落点，背景可以是山野、溪流、岩石、晨光、棚拍运动质感中的一种，但不要喧宾夺主；留出适合视频结尾停留的干净空间。\n"
+        "文字要求：只允许少量高级广告字，必须包含产品名称；可以加一句短广告语，但不要价格、二维码、购买按钮、促销标签、联系方式、平台水印或大段文案。\n"
+        "输出要求：真实商业摄影/广告海报质感，高清、锐利、产品边缘清楚，适合作为视频结尾定格收尾。"
     )
 
 
@@ -1098,19 +2082,49 @@ async def list_batch_video_models():
     return {
         "language_models": LANGUAGE_MODELS,
         "image_models": IMAGE_MODELS,
-        "video_models": VIDEO_MODELS,
+        "video_models": _batch_video_models(),
         "asr": asr_status,
     }
+
+
+@router.get("/draft")
+async def get_workbench_draft():
+    raw = db.get_user_setting(WORKBENCH_DRAFT_SETTING_KEY, "")
+    if not raw:
+        return {"draft": None, "updatedAt": 0}
+    try:
+        draft = json.loads(raw)
+    except Exception:
+        return {"draft": None, "updatedAt": 0}
+    if not isinstance(draft, dict):
+        return {"draft": None, "updatedAt": 0}
+    return {
+        "draft": draft,
+        "updatedAt": int(draft.get("updatedAt") or 0),
+    }
+
+
+@router.put("/draft")
+async def save_workbench_draft(req: WorkbenchDraftRequest):
+    draft = dict(req.draft or {})
+    draft["updatedAt"] = int(draft.get("updatedAt") or datetime.now(timezone.utc).timestamp() * 1000)
+    db.set_user_setting(
+        WORKBENCH_DRAFT_SETTING_KEY,
+        json.dumps(draft, ensure_ascii=False, separators=(",", ":")),
+    )
+    return {"ok": True, "updatedAt": draft["updatedAt"]}
 
 
 @router.post("/product-reconstruction")
 async def build_product_reconstruction(req: ProductReconstructionRequest):
     reference_urls = [url for url in dict.fromkeys(req.product.image_urls or []) if str(url or "").strip()]
+    image_provider = _model_provider(req.image_model or "image2", IMAGE_MODELS, "jimeng")
+    reference_limit = 4 if image_provider == "openai_image" else 8
     if not reference_urls:
         return {
             "status": "needs_reference",
             "image_model": req.image_model,
-            "provider": _model_provider(req.image_model, IMAGE_MODELS, "jimeng"),
+            "provider": image_provider,
             "prompt": "",
             "reference_urls": [],
             "message": "请先上传产品参考图，再生成产品完整形态详情表。",
@@ -1118,18 +2132,45 @@ async def build_product_reconstruction(req: ProductReconstructionRequest):
     return {
         "status": "ready",
         "image_model": req.image_model or "image2",
-        "provider": _model_provider(req.image_model or "image2", IMAGE_MODELS, "jimeng"),
+        "provider": image_provider,
         "aspect_ratio": req.aspect_ratio or "16:9",
         "prompt": _product_reconstruction_prompt(req.product),
-        "reference_urls": reference_urls[:8],
+        "reference_urls": reference_urls[:reference_limit],
         "views": [
             {"id": "front", "label": "正视图"},
-            {"id": "side", "label": "侧视图"},
+            {"id": "left_side", "label": "左侧视图"},
+            {"id": "right_side", "label": "右侧视图"},
             {"id": "top", "label": "俯视图"},
             {"id": "bottom", "label": "仰视图"},
             {"id": "details", "label": "细节特写"},
         ],
         "message": "产品完整形态详情表提示词已生成，可调用 Image2/图片模型生成。",
+    }
+
+
+@router.post("/product-poster")
+async def build_product_poster(req: ProductPosterRequest):
+    product_refs = [url for url in [req.product.detail_sheet_url, *(req.product.image_urls or [])] if str(url or "").strip()]
+    image_provider = _model_provider(req.image_model or "image2", IMAGE_MODELS, "openai_image")
+    reference_limit = 4 if image_provider == "openai_image" else 8
+    if not product_refs:
+        return {
+            "status": "needs_reference",
+            "image_model": req.image_model,
+            "provider": image_provider,
+            "prompt": "",
+            "reference_urls": [],
+            "message": "请先上传产品图，或先用 Image2 生成并选择最终版产品还原图，再制作收尾海报。",
+        }
+    return {
+        "status": "ready",
+        "image_model": req.image_model or "image2",
+        "provider": image_provider,
+        "aspect_ratio": req.aspect_ratio or "9:16",
+        "prompt": _product_poster_prompt(req.product, req.selling_points or []),
+        "reference_urls": product_refs[:reference_limit],
+        "duration": 2,
+        "message": "产品收尾海报提示词已生成，可调用 Image2/图片模型生成。",
     }
 
 
@@ -1273,9 +2314,12 @@ async def generate_selling_points(req: SellingPointsRequest):
 
 @router.post("/storyboard-plan")
 async def build_storyboard_plan(req: StoryboardPlanRequest):
-    is_veo = (req.video_model or "") in VEO_MODEL_IDS
-    count = VEO_STORYBOARD_SCENE_COUNT if is_veo else max(DEFAULT_STORYBOARD_SCENE_COUNT, min(int(req.variant_count or DEFAULT_STORYBOARD_SCENE_COUNT), 12))
-    duration = VEO_STORYBOARD_DURATION if is_veo else max(4, min(int(req.duration or 5), 15))
+    is_veo = _is_fixed_eight_second_model(req.video_model or "")
+    brief_count, brief_duration = _parse_storyboard_creative_brief(req.creative_brief)
+    requested_count = brief_count if brief_count else int(req.variant_count or DEFAULT_STORYBOARD_SCENE_COUNT)
+    requested_duration = brief_duration if brief_duration else int(req.duration or 5)
+    count = VEO_STORYBOARD_SCENE_COUNT if is_veo else max(1, min(requested_count, 12))
+    duration = VEO_STORYBOARD_DURATION if is_veo else max(4, min(requested_duration, 15))
     seed_value = _storyboard_seed(req)
     route = _creative_route(seed_value) if is_veo else None
     raw_points = req.selling_points or [
@@ -1314,7 +2358,7 @@ async def build_storyboard_plan(req: StoryboardPlanRequest):
 async def submit_batch_video(req: SubmitBatchRequest):
     batch_id = f"batch_{uuid.uuid4().hex[:10]}"
     image_provider = _model_provider(req.image_model, IMAGE_MODELS, "jimeng")
-    video_provider = _model_provider(req.video_model, VIDEO_MODELS, "jimeng")
+    video_provider = _model_provider(req.video_model, _batch_video_models(), "jimeng")
     product_refs = [url for url in [req.product.detail_sheet_url, *req.product.image_urls] if url]
     tasks = []
     for index, scene in enumerate(req.scenes):
@@ -1330,12 +2374,12 @@ async def submit_batch_video(req: SubmitBatchRequest):
         }
         video_request = {
             "project_id": "",
-            "prompt": scene.video_prompt,
+            "prompt": _normalize_video_prompt_sound(scene.video_prompt),
             "provider": video_provider,
             "model": req.video_model,
             "duration": req.duration,
             "aspect_ratio": req.aspect_ratio,
-            "resolution": "720p",
+            "resolution": req.resolution or "720p",
             "character_refs": [],
             "scene_refs": [scene.storyboard_image_url] if scene.storyboard_image_url else product_refs[:1],
             "reference_video_url": "",
@@ -1357,4 +2401,366 @@ async def submit_batch_video(req: SubmitBatchRequest):
         "created_at": _now(),
         "tasks": tasks,
         "message": "批量任务已整理为可执行请求，请在前端逐条或批量调用图片/视频模型。",
+    }
+
+
+@router.post("/compose-final-video")
+async def compose_final_video(req: ComposeFinalVideoRequest):
+    segments = [item for item in req.segments if (item.video_url or "").strip()]
+    if not segments:
+        return {
+            "status": "needs_video",
+            "video_url": "",
+            "message": "请先为每个分镜选择最终视频版本，再合成完整视频。",
+        }
+
+    local_segments: list[tuple[FinalVideoSegment, Path]] = []
+    for item in segments:
+        path = deps.get_local_file_path_from_url(item.video_url)
+        if not path or not path.exists():
+            return {
+                "status": "missing_file",
+                "video_url": "",
+                "scene_id": item.scene_id,
+                "message": f"分镜「{item.title or item.scene_id or '未命名'}」的视频文件不在本地，请先重新拉取结果或重新上传。",
+            }
+        local_segments.append((item, path))
+
+    custom_bgm_path: Path | None = None
+    if req.bgm_enabled and (req.bgm_url or "").strip():
+        custom_bgm_path = deps.get_local_file_path_from_url(req.bgm_url.strip())
+        if not custom_bgm_path or not custom_bgm_path.exists():
+            return {
+                "status": "missing_bgm",
+                "video_url": "",
+                "message": "已选择自定义 BGM，但本地音频文件不存在，请重新上传 BGM 后再合成。",
+            }
+
+    poster_image_path: Path | None = None
+    requested_poster_duration = max(0.0, min(8.0, float(req.poster_duration or 0.0)))
+    poster_duration = requested_poster_duration if requested_poster_duration > 0 else 2.0
+    if (req.poster_image_url or "").strip():
+        poster_image_path = deps.get_local_file_path_from_url(req.poster_image_url.strip())
+        if not poster_image_path or not poster_image_path.exists():
+            return {
+                "status": "missing_poster",
+                "video_url": "",
+                "message": "已选择收尾产品海报，但本地图片文件不存在，请重新生成或重新上传海报后再合成。",
+            }
+
+    width, height = _target_video_size(req.aspect_ratio)
+    ffmpeg = _ffmpeg_exe()
+    output_name = "".join(ch for ch in (req.output_name or "batch_final_video") if ch.isascii() and (ch.isalnum() or ch in ("_", "-")))
+    output_name = output_name[:40] or "batch_final_video"
+    final_name = f"{output_name}_{uuid.uuid4().hex[:10]}.mp4"
+    final_path = deps.get_files_dir() / final_name
+    voiceover_api_key = _setting_value(*ASR_API_KEY_FIELD["setting_keys"]) or os.environ.get(ASR_API_KEY_FIELD["env"], "")
+    product_name = _clean_text(req.product_name, 80)
+    has_product_detail_final_segment = any(_is_product_detail_final_segment(item) for item in segments)
+    poster_voiceover_text = _poster_voiceover_text(
+        product_name,
+        product_name_spoken=has_product_detail_final_segment,
+    ) if poster_image_path and product_name else ""
+    has_voiceover_text = any(item.voiceover_text or _is_product_detail_final_segment(item) for item in segments) or bool(poster_voiceover_text)
+    should_voiceover = (
+        req.voiceover_enabled
+        and (req.tts_provider or "doubao_speech_2_0") == "doubao_speech_2_0"
+        and has_voiceover_text
+    )
+    voiceover_generated = False
+    voiceover_error = ""
+    voiceover_audio_count = 0
+    poster_duration_used = poster_duration if poster_image_path else 0.0
+
+    if should_voiceover and not voiceover_api_key:
+        return {
+            "status": "voiceover_failed",
+            "video_url": "",
+            "message": "旁白配音失败：豆包语音 API Key 未配置，无法生成有声完整视频。",
+            "voiceover_error": "豆包语音 API Key 未配置。",
+        }
+
+    async def _compose_async() -> None:
+        nonlocal voiceover_audio_count
+        voiceover_audio_count = 0
+        with tempfile.TemporaryDirectory(prefix="batch_video_compose_") as tmp:
+            tmp_dir = Path(tmp)
+            prepared_paths: list[Path] = []
+            audio_paths: list[Path] = []
+            for index, (item, input_path) in enumerate(local_segments):
+                prepared = tmp_dir / f"segment_{index:03d}.mp4"
+                subtitle = item.subtitle or item.voiceover_text or item.title or f"分镜 {index + 1}"
+                await asyncio.to_thread(
+                    _prepare_video_segment_sync,
+                    ffmpeg,
+                    input_path,
+                    prepared,
+                    width=width,
+                    height=height,
+                    subtitle=subtitle,
+                    subtitle_enabled=req.subtitle_enabled,
+                    start_time=item.start_time,
+                    end_time=item.end_time,
+                )
+                prepared_paths.append(prepared)
+                voiceover_text = (item.voiceover_text or item.subtitle or "").strip()
+                if should_voiceover and voiceover_text:
+                    audio_path = tmp_dir / f"voiceover_{index:03d}.mp3"
+                    fitted_audio_path = tmp_dir / f"voiceover_fit_{index:03d}.m4a"
+                    await synthesize_speech_2_0_file(
+                        api_key=voiceover_api_key,
+                        text=voiceover_text,
+                        output_path=audio_path,
+                        voice_type=req.tts_voice_type,
+                        speed_ratio=req.tts_speed_ratio,
+                    )
+                    if not audio_path.exists() or audio_path.stat().st_size <= 0:
+                        raise DoubaoSpeechError("豆包语音合成返回音频为空。")
+                    try:
+                        clip_start = max(0.0, float(item.start_time or 0.0))
+                        clip_end = max(0.0, float(item.end_time or 0.0)) if item.end_time is not None else 0.0
+                        segment_duration = clip_end - clip_start if clip_end > clip_start else 0.0
+                    except (TypeError, ValueError):
+                        segment_duration = 0.0
+                    if segment_duration <= 0:
+                        segment_duration = await asyncio.to_thread(deps.get_local_video_duration_seconds, item.video_url)
+                    await asyncio.to_thread(_fit_audio_to_duration_sync, ffmpeg, audio_path, fitted_audio_path, segment_duration)
+                    audio_paths.append(fitted_audio_path)
+                    voiceover_audio_count += 1
+            if should_voiceover and not audio_paths:
+                raise DoubaoSpeechError("未生成任何旁白音频，请检查完整视频区域的旁白文案。")
+            video_only_path = tmp_dir / "video_only.mp4" if should_voiceover and audio_paths else final_path
+            await asyncio.to_thread(_concat_videos_sync, ffmpeg, prepared_paths, tmp_dir / "concat.txt", video_only_path)
+            if should_voiceover and audio_paths:
+                voiceover_path = tmp_dir / "voiceover.m4a"
+                await asyncio.to_thread(_concat_audio_sync, ffmpeg, audio_paths, tmp_dir / "audio_concat.txt", voiceover_path)
+                await asyncio.to_thread(_mux_video_audio_sync, ffmpeg, video_only_path, voiceover_path, final_path)
+
+    async def _compose_async_v2() -> None:
+        nonlocal voiceover_audio_count, poster_duration_used
+        voiceover_audio_count = 0
+        poster_duration_used = poster_duration if poster_image_path else 0.0
+        with tempfile.TemporaryDirectory(prefix="batch_video_compose_") as tmp:
+            tmp_dir = Path(tmp)
+            prepared_paths: list[Path] = []
+            voiceover_audio_paths: list[Path] = []
+            original_audio_paths: list[Path] = []
+            segment_durations: list[float] = []
+            main_prepared_paths: list[Path] = []
+            poster_prepared_path: Path | None = None
+
+            for index, (item, input_path) in enumerate(local_segments):
+                prepared = tmp_dir / f"segment_{index:03d}.mp4"
+                raw_voiceover_text = (item.voiceover_text or "").strip()
+                voiceover_text = _voiceover_for_final_segment(
+                    raw_voiceover_text,
+                    product_name,
+                    product_name_only=bool(product_name and _is_product_detail_final_segment(item)),
+                )
+                subtitle = item.subtitle or voiceover_text or item.title or f"Segment {index + 1}"
+                if req.voiceover_enabled and voiceover_text and subtitle == raw_voiceover_text:
+                    subtitle = voiceover_text
+
+                segment_duration = _segment_clip_duration(item)
+                if segment_duration <= 0:
+                    segment_duration = await asyncio.to_thread(deps.get_local_video_duration_seconds, item.video_url) or 0.0
+                segment_durations.append(segment_duration)
+
+                await asyncio.to_thread(
+                    _prepare_video_segment_sync,
+                    ffmpeg,
+                    input_path,
+                    prepared,
+                    width=width,
+                    height=height,
+                    subtitle=subtitle,
+                    subtitle_enabled=req.subtitle_enabled,
+                    start_time=item.start_time,
+                    end_time=item.end_time,
+                )
+                prepared_paths.append(prepared)
+                main_prepared_paths.append(prepared)
+
+                if req.keep_original_audio:
+                    original_audio_path = tmp_dir / f"original_audio_{index:03d}.m4a"
+                    await asyncio.to_thread(
+                        _extract_segment_audio_sync,
+                        ffmpeg,
+                        input_path,
+                        original_audio_path,
+                        start_time=item.start_time,
+                        end_time=item.end_time,
+                        duration=segment_duration,
+                    )
+                    original_audio_paths.append(original_audio_path)
+
+                if should_voiceover and voiceover_text:
+                    audio_path = tmp_dir / f"voiceover_{index:03d}.mp3"
+                    fitted_audio_path = tmp_dir / f"voiceover_fit_{index:03d}.m4a"
+                    await synthesize_speech_2_0_file(
+                        api_key=voiceover_api_key,
+                        text=voiceover_text,
+                        output_path=audio_path,
+                        voice_type=req.tts_voice_type,
+                        speed_ratio=req.tts_speed_ratio,
+                    )
+                    if not audio_path.exists() or audio_path.stat().st_size <= 0:
+                        raise DoubaoSpeechError("Voiceover synthesis returned empty audio.")
+                    await asyncio.to_thread(_fit_audio_to_duration_sync, ffmpeg, audio_path, fitted_audio_path, segment_duration)
+                    voiceover_audio_paths.append(fitted_audio_path)
+                    voiceover_audio_count += 1
+                elif should_voiceover:
+                    silent_voiceover_path = tmp_dir / f"voiceover_silence_{index:03d}.m4a"
+                    await asyncio.to_thread(_silent_audio_sync, ffmpeg, silent_voiceover_path, segment_duration)
+                    voiceover_audio_paths.append(silent_voiceover_path)
+
+            if poster_image_path and poster_duration > 0:
+                actual_poster_duration = poster_duration
+                poster_text = poster_voiceover_text
+                poster_fitted_audio_path: Path | None = None
+                if should_voiceover and poster_text:
+                    audio_path = tmp_dir / "voiceover_poster.mp3"
+                    poster_fitted_audio_path = tmp_dir / "voiceover_fit_poster.m4a"
+                    await synthesize_speech_2_0_file(
+                        api_key=voiceover_api_key,
+                        text=poster_text,
+                        output_path=audio_path,
+                        voice_type=req.tts_voice_type,
+                        speed_ratio=req.tts_speed_ratio,
+                    )
+                    if not audio_path.exists() or audio_path.stat().st_size <= 0:
+                        raise DoubaoSpeechError("Poster voiceover synthesis returned empty audio.")
+                    poster_audio_duration = await asyncio.to_thread(_media_duration_seconds_sync, ffmpeg, audio_path)
+                    actual_poster_duration = _poster_duration_for_voiceover(poster_audio_duration, poster_duration)
+                    await asyncio.to_thread(_fit_audio_to_duration_sync, ffmpeg, audio_path, poster_fitted_audio_path, actual_poster_duration)
+                    voiceover_audio_paths.append(poster_fitted_audio_path)
+                    voiceover_audio_count += 1
+                elif should_voiceover:
+                    poster_fitted_audio_path = tmp_dir / "voiceover_silence_poster.m4a"
+                    await asyncio.to_thread(_silent_audio_sync, ffmpeg, poster_fitted_audio_path, actual_poster_duration)
+                    voiceover_audio_paths.append(poster_fitted_audio_path)
+
+                poster_duration_used = actual_poster_duration
+                poster_prepared = tmp_dir / "poster_segment.mp4"
+                poster_source_duration = actual_poster_duration
+                await asyncio.to_thread(
+                    _prepare_poster_segment_sync,
+                    ffmpeg,
+                    poster_image_path,
+                    poster_prepared,
+                    width=width,
+                    height=height,
+                    duration=poster_source_duration,
+                )
+                prepared_paths.append(poster_prepared)
+                poster_prepared_path = poster_prepared
+                segment_durations.append(actual_poster_duration)
+                if req.keep_original_audio:
+                    poster_silent_audio = tmp_dir / "poster_silence.m4a"
+                    await asyncio.to_thread(_silent_audio_sync, ffmpeg, poster_silent_audio, actual_poster_duration)
+                    original_audio_paths.append(poster_silent_audio)
+
+            if should_voiceover and voiceover_audio_count <= 0:
+                raise DoubaoSpeechError("No voiceover audio was generated.")
+
+            video_only_path = tmp_dir / "video_only.mp4"
+            main_duration = sum(duration for duration in segment_durations[:-1] if duration and duration > 0) if poster_prepared_path else 0.0
+            if poster_prepared_path:
+                await asyncio.to_thread(
+                    _concat_videos_with_poster_transition_sync,
+                    ffmpeg,
+                    main_prepared_paths,
+                    poster_prepared_path,
+                    tmp_dir / "concat.txt",
+                    video_only_path,
+                    main_duration=main_duration,
+                )
+            else:
+                await asyncio.to_thread(_concat_videos_sync, ffmpeg, prepared_paths, tmp_dir / "concat.txt", video_only_path)
+
+            total_duration = await asyncio.to_thread(_media_duration_seconds_sync, ffmpeg, video_only_path)
+            if not total_duration or total_duration <= 0:
+                total_duration = sum(duration for duration in segment_durations if duration and duration > 0)
+            audio_tracks: list[tuple[Path, float]] = []
+
+            if req.keep_original_audio and original_audio_paths:
+                original_audio_path = tmp_dir / "original_audio.m4a"
+                await asyncio.to_thread(
+                    _concat_audio_sync,
+                    ffmpeg,
+                    original_audio_paths,
+                    tmp_dir / "original_audio_concat.txt",
+                    original_audio_path,
+                )
+                audio_tracks.append((original_audio_path, req.original_audio_volume))
+
+            if should_voiceover and voiceover_audio_paths:
+                voiceover_path = tmp_dir / "voiceover.m4a"
+                await asyncio.to_thread(_concat_audio_sync, ffmpeg, voiceover_audio_paths, tmp_dir / "audio_concat.txt", voiceover_path)
+                audio_tracks.append((voiceover_path, req.voiceover_volume))
+
+            if req.bgm_enabled and total_duration > 0:
+                if custom_bgm_path:
+                    bgm_path = tmp_dir / "custom_bgm.m4a"
+                    await asyncio.to_thread(_fit_bgm_to_duration_sync, ffmpeg, custom_bgm_path, bgm_path, total_duration)
+                else:
+                    bgm_path = tmp_dir / "drum_bgm.wav"
+                    await asyncio.to_thread(_generate_drum_bgm_sync, bgm_path, total_duration)
+                audio_tracks.append((bgm_path, req.bgm_volume))
+
+            if audio_tracks:
+                final_audio_path = tmp_dir / "final_audio.m4a"
+                await asyncio.to_thread(_mix_audio_tracks_sync, ffmpeg, audio_tracks, final_audio_path, duration=total_duration)
+                await asyncio.to_thread(_mux_video_audio_sync, ffmpeg, video_only_path, final_audio_path, final_path)
+            else:
+                shutil.copyfile(video_only_path, final_path)
+
+    try:
+        await _compose_async_v2()
+        voiceover_generated = should_voiceover and voiceover_audio_count > 0
+        deps.notify_media_file_saved(final_path)
+    except DoubaoSpeechError as exc:
+        try:
+            final_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        voiceover_error = str(exc)
+        return {
+            "status": "voiceover_failed",
+            "video_url": "",
+            "message": f"旁白配音失败：{voiceover_error[:300]}",
+            "voiceover_enabled": req.voiceover_enabled,
+            "voiceover_generated": False,
+            "voiceover_provider": req.tts_provider,
+            "voiceover_error": voiceover_error,
+        }
+    except Exception as exc:
+        try:
+            final_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return {
+            "status": "failed",
+            "video_url": "",
+            "message": f"完整视频合成失败：{str(exc)[:300]}",
+        }
+
+    return {
+        "status": "completed",
+        "video_url": f"/api/files/{final_name}",
+        "segment_count": len(local_segments),
+        "aspect_ratio": req.aspect_ratio,
+        "subtitle_enabled": req.subtitle_enabled,
+        "voiceover_enabled": req.voiceover_enabled,
+        "voiceover_generated": voiceover_generated,
+        "voiceover_provider": req.tts_provider,
+        "voiceover_error": voiceover_error,
+        "poster_appended": bool(poster_image_path),
+        "poster_duration": poster_duration_used if poster_image_path else 0,
+        "message": (
+            f"完整视频已合成：已保留片段原声，加入{'自定义' if custom_bgm_path else '默认鼓点'} BGM、旁白和字幕"
+            f"{'，并用淡入转场在最后追加产品海报，海报停留时长会跟随产品名旁白' if poster_image_path else ''}，可以预览或下载。"
+            if not voiceover_error
+            else f"完整视频已合成，但旁白配音失败，仅保留字幕：{voiceover_error[:160]}"
+        ),
     }

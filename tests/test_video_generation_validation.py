@@ -58,7 +58,11 @@ class VideoGenerationValidationTests(unittest.TestCase):
         self.assertEqual(result.mode, "generate")
 
     def test_ref_image_and_ref_video_support_is_enforced(self):
-        self.assert_invalid("不支持参考图", model="seedance-1.5-pro", character_refs=["/api/files/a.png"])
+        self.assert_invalid(
+            "最多支持 2 张参考图",
+            model="seedance-1.5-pro",
+            character_refs=["/api/files/a.png", "/api/files/b.png", "/api/files/c.png"],
+        )
         self.assert_invalid("不支持参考视频", model="seedance-1.5-pro", reference_video_url="/api/files/a.mp4")
         self.assert_invalid(
             "不支持参考视频",
@@ -135,6 +139,31 @@ class VideoGenerationValidationTests(unittest.TestCase):
             reference_video_url="/api/files/a.mp4",
         )
         self.assertEqual((i2v.mode, r2v.mode, edit.mode), ("generate", "generate", "reference_video"))
+
+    def test_toapis_reference_image_and_duration_rules(self):
+        self.assert_invalid(
+            "需要至少 1 张参考图",
+            provider="toapis",
+            model="grok-video-1.5-preview",
+            duration=10,
+            resolution="720p",
+        )
+        self.assert_invalid(
+            "10-15 秒",
+            provider="toapis",
+            model="grok-video-1.5-preview",
+            duration=8,
+            resolution="720p",
+            image_url="/api/files/a.png",
+        )
+        result = _valid(
+            provider="toapis",
+            model="grok-video-1.5-preview",
+            duration=10,
+            resolution="720p",
+            image_url="/api/files/a.png",
+        )
+        self.assertEqual(result.mode, "generate")
 
 
 if __name__ == "__main__":

@@ -631,7 +631,7 @@ async def cache_remote_file_result(result: dict) -> dict:
     return result
 
 
-def save_gemini_image_result(result: dict) -> dict:
+def save_base64_image_result(result: dict, prefix: str = "image") -> dict:
     import base64 as _b64
     saved = []
     for img in result.get("images", []):
@@ -639,13 +639,18 @@ def save_gemini_image_result(result: dict) -> dict:
         if not data:
             continue
         png = _normalize_image_output_to_png_bytes(_b64.b64decode(data))
-        fname = f"gemini_{uuid.uuid4().hex[:12]}.png"
+        safe_prefix = "".join(ch for ch in (prefix or "image") if ch.isalnum() or ch in ("_", "-")) or "image"
+        fname = f"{safe_prefix}_{uuid.uuid4().hex[:12]}.png"
         fpath = get_files_dir() / fname
         fpath.write_bytes(png)
         notify_media_file_saved(fpath)
         saved.append({"url": f"/api/files/{fname}", "mime_type": "image/png"})
     first_url = saved[0]["url"] if saved else ""
     return {"image_url": first_url, "images": saved}
+
+
+def save_gemini_image_result(result: dict) -> dict:
+    return save_base64_image_result(result, "gemini")
 
 
 # ── 图片/视频 URL 解析 ──────────────────────────────

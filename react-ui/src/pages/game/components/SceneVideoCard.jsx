@@ -20,6 +20,7 @@ import {
 import { AI_MODELS, VIDEO_RESOLUTION_OPTIONS } from '../gameVideoConstants'
 import { formatProviderVideoCacheError, isProviderVideoCacheError, mediaUrl } from '../gameVideoPageHelpers'
 import {
+  formatVideoCostEstimate,
   getModelResolutionIds,
   getVideoMaxReferenceVideos,
   getVideoModeBlockReason,
@@ -91,6 +92,7 @@ export default function SceneVideoCard({
   const sceneActionDisabled = !!sceneBlockReason
   const sceneActionTitle = sceneBlockReason || ''
   const sceneCost = estimateCost(scene)
+  const sceneCostText = formatVideoCostEstimate(sceneCost)
   const canRetryResultCache = !!scene.taskId && isProviderVideoCacheError(scene.error) && typeof onRetryResultCache === 'function'
   const retryingResultCache = canRetryResultCache && scene.retryingResultCache
   const displayError = formatProviderVideoCacheError(scene.error)
@@ -562,7 +564,7 @@ export default function SceneVideoCard({
                   </div>
                   <div style={{ display: 'flex', gap: 4, marginTop: 5 }}>
                     <a href={mediaUrl(scene.videoUrl)} download={`场景${scene.idx}.mp4`} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3, padding: '4px 0', borderRadius: 5, fontSize: 10, fontWeight: 600, background: 'rgba(16,185,129,0.1)', color: '#10b981', textDecoration: 'none', border: '1px solid rgba(16,185,129,0.2)' }}><Download size={10} /> 下载</a>
-                    <button onClick={runSceneVideo} title={sceneActionTitle} disabled={sceneActionDisabled} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3, padding: '4px 0', borderRadius: 5, fontSize: 10, background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', border: '1px solid var(--border)', opacity: sceneActionDisabled ? 0.45 : 1 }}><RefreshCw size={10} /> {isAdvancedVideoMode ? '按高级参考重生成' : isReferenceVideoMode ? '按参考视频重生成' : '重新生成'}{sceneCost != null && <span style={{ opacity: 0.6 }}> ≈{sceneCost}元</span>}</button>
+                    <button onClick={runSceneVideo} title={sceneActionTitle} disabled={sceneActionDisabled} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3, padding: '4px 0', borderRadius: 5, fontSize: 10, background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', border: '1px solid var(--border)', opacity: sceneActionDisabled ? 0.45 : 1 }}><RefreshCw size={10} /> {isAdvancedVideoMode ? '按高级参考重生成' : isReferenceVideoMode ? '按参考视频重生成' : '重新生成'}{sceneCostText && <span style={{ opacity: 0.6 }}> ≈{sceneCostText}</span>}</button>
                   </div>
                 </div>
               ) : (
@@ -589,7 +591,7 @@ export default function SceneVideoCard({
                           }}>
                             <Video size={13} />
                             {isAdvancedVideoMode ? '高级视频编辑' : isReferenceVideoMode ? '参考视频生成' : '生成视频'}
-                            {sceneCost != null && <span style={{ fontWeight: 600, opacity: canRun ? 0.85 : 0.9 }}>≈{sceneCost}元</span>}
+                            {sceneCostText && <span style={{ fontWeight: 600, opacity: canRun ? 0.85 : 0.9 }}>≈{sceneCostText}</span>}
                           </button>
                         )
                       })()}

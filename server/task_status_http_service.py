@@ -35,6 +35,8 @@ async def retry_game_task_result_cache(
     if not gt:
         gt = await db_call(db.get_game_task, task_id)
     if not gt:
+        if str(task_id or "").startswith("tsk_vid_"):
+            return await query_task_status(task_id, force_failed_cache_retry=True)
         raise HTTPException(404, "Task not found")
 
     terminal_result = terminal_task_result_from_db(task_id, gt)

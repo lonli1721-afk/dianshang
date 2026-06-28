@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertCircle, Check, Clock, Copy, FileVideo2, Filter, History, Loader2, Plus, RefreshCw, Save, Search, Sparkles, Star, Trash2, Upload, Video } from 'lucide-react'
 import { api, runConcurrent } from '../../services/api'
 import { FALLBACK_VIDEO_MODELS } from '../game/gameVideoConstants'
+import { normalizeVideoSoundPrompt } from '../game/sceneVideoGenerationPayload'
 import { useGameTaskPolling } from '../game/useGameTaskPolling'
 import AnalysisBriefStrip from './components/AnalysisBriefStrip'
 import ViralWorkbenchHeader from './components/ViralWorkbenchHeader'
@@ -201,7 +202,7 @@ function planToDraft(plan) {
     test_objective: localizeMarketingTerms(plan.test_objective || ''),
     script_outline_text: listToText(plan.script_outline),
     storyboard_rhythm_text: listToText(plan.storyboard_rhythm),
-    video_prompt: localizeMarketingTerms(plan.video_prompt || ''),
+    video_prompt: normalizeVideoSoundPrompt(localizeMarketingTerms(plan.video_prompt || '')),
     user_revision_note: localizeMarketingTerms(plan.user_revision_note || ''),
   }
 }
@@ -215,7 +216,7 @@ function draftToComparable(draft) {
     test_objective: String(draft.test_objective || '').trim(),
     script_outline: textToList(draft.script_outline_text, 10),
     storyboard_rhythm: textToList(draft.storyboard_rhythm_text, 10),
-    video_prompt: String(draft.video_prompt || '').trim(),
+    video_prompt: normalizeVideoSoundPrompt(draft.video_prompt),
     user_revision_note: String(draft.user_revision_note || '').trim(),
   }
 }
@@ -1341,7 +1342,7 @@ export default function ViralWorkbenchPage() {
 
   function buildSceneFromPlan(existingScene = null, sceneId = '', planInput = null) {
     const draft = planInput || effectivePlanDraft
-    const prompt = (draft?.video_prompt || '').trim()
+    const prompt = normalizeVideoSoundPrompt(draft?.video_prompt || '')
     const modelRow = videoModels.find(item => item.id === sceneApplyConfig.model) || videoModels[0] || getFallbackTextToVideoModel()
     const baseScene = existingScene && typeof existingScene === 'object' ? existingScene : {}
     const previousVideoHistory = Array.isArray(baseScene.videoHistory) ? baseScene.videoHistory : []
@@ -1443,7 +1444,7 @@ export default function ViralWorkbenchPage() {
           try {
             const result = await api.post('/api/game/generate_video', {
               project_id: sceneApplyConfig.project_id,
-              prompt: scene.prompt,
+              prompt: normalizeVideoSoundPrompt(scene.prompt),
               provider: modelRow?.provider || scene.provider || 'jimeng',
               model: scene.model,
               duration: scene.duration,
@@ -1561,7 +1562,7 @@ export default function ViralWorkbenchPage() {
         const modelRow = videoModels.find(item => item.id === nextScene.model) || videoModels[0] || getFallbackTextToVideoModel()
         const result = await api.post('/api/game/generate_video', {
           project_id: sceneApplyConfig.project_id,
-          prompt: nextScene.prompt,
+          prompt: normalizeVideoSoundPrompt(nextScene.prompt),
           provider: modelRow?.provider || nextScene.provider || 'jimeng',
           model: nextScene.model,
           duration: nextScene.duration,
@@ -1615,7 +1616,7 @@ export default function ViralWorkbenchPage() {
       }
       const result = await api.post('/api/game/generate_video', {
         project_id: sceneApplyConfig.project_id,
-        prompt,
+        prompt: normalizeVideoSoundPrompt(prompt),
         provider: modelRow?.provider || targetScene.provider || sceneApplyConfig.provider || 'jimeng',
         model: targetScene.model || sceneApplyConfig.model,
         duration: Number(targetScene.duration || sceneApplyConfig.duration) || 5,
@@ -1683,7 +1684,7 @@ export default function ViralWorkbenchPage() {
       test_objective: draft.test_objective.trim(),
       script_outline: textToList(draft.script_outline_text, 10),
       storyboard_rhythm: textToList(draft.storyboard_rhythm_text, 10),
-      video_prompt: draft.video_prompt.trim(),
+      video_prompt: normalizeVideoSoundPrompt(draft.video_prompt),
       user_revision_note: draft.user_revision_note.trim(),
     }
   }
@@ -1716,7 +1717,7 @@ export default function ViralWorkbenchPage() {
         change_points_text: rewritten.change_points ? listToText(rewritten.change_points) : (prev || effectivePlanDraft).change_points_text,
         script_outline_text: rewritten.script_outline ? listToText(rewritten.script_outline) : (prev || effectivePlanDraft).script_outline_text,
         storyboard_rhythm_text: rewritten.storyboard_rhythm ? listToText(rewritten.storyboard_rhythm) : (prev || effectivePlanDraft).storyboard_rhythm_text,
-        video_prompt: rewritten.video_prompt ? localizeMarketingTerms(rewritten.video_prompt) : (prev || effectivePlanDraft).video_prompt,
+        video_prompt: rewritten.video_prompt ? normalizeVideoSoundPrompt(localizeMarketingTerms(rewritten.video_prompt)) : (prev || effectivePlanDraft).video_prompt,
       }))
       const labels = rewriteTargetOptions.filter(item => rewriteTargets.includes(item.value)).map(item => item.label).join('、')
       setNotice(`AI 已按修改要求重写：${labels}`)

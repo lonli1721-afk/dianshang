@@ -91,6 +91,8 @@ export function useGameTaskPolling({
         const task = tasks[taskId]
         if (!task) continue
         const status = String(task.status || '').toLowerCase()
+        const progress = task.progress ?? task.progress_percent ?? task.percent ?? null
+        const message = task.message || task.status_text || task.detail || ''
 
         if (status === 'completed' || status === 'succeeded' || status === 'success') {
           const videoUrl = task.video_url || ''
@@ -98,6 +100,8 @@ export function useGameTaskPolling({
             updater({
               status: 'failed',
               error: task.error || '任务已完成但未返回视频地址',
+              progress: progress ?? 1,
+              message,
               startTime: null,
             })
           } else {
@@ -105,6 +109,8 @@ export function useGameTaskPolling({
               status: 'completed',
               videoUrl,
               error: '',
+              progress: progress ?? 1,
+              message,
               startTime: null,
             })
           }
@@ -116,10 +122,20 @@ export function useGameTaskPolling({
           updater({
             status: 'failed',
             error: task.error || '生成失败',
+            progress,
+            message,
             startTime: null,
           })
           clearTaskPolling(taskId)
+          continue
         }
+
+        updater({
+          status: status || 'processing',
+          progress,
+          message,
+          taskId,
+        })
       }
     } catch (error) {
       consecutivePollingErrorsRef.current += 1

@@ -118,6 +118,34 @@ export function getVideoPricePerSecond(model, scene) {
   return base
 }
 
+export function getVideoPriceUnitLabel(model) {
+  const unit = String(model?.price_unit || 'CNY').toLowerCase()
+  if (unit === 'credits') return '积分'
+  if (unit === 'cny') return '元'
+  return model?.price_unit || ''
+}
+
+export function getVideoPricePerSecondCny(model, scene) {
+  const unit = String(model?.price_unit || 'CNY').toLowerCase()
+  const base = Number(model?.estimated_price_per_second_cny || 0) || (unit === 'cny' ? Number(model?.price_per_second || 0) : 0)
+  if (!base) return 0
+  if (scene?.videoResolution === '1080p' && model?.price_unit !== 'credits') {
+    if (model?.price_per_second_1080p) return Number(model.price_per_second_1080p)
+    if (model?.price_resolution_multiplier_1080p) return base * Number(model.price_resolution_multiplier_1080p)
+  }
+  return base
+}
+
+export function formatVideoCostEstimate(estimate) {
+  if (!estimate) return ''
+  if (typeof estimate === 'number') return `${estimate}元`
+  const base = `${estimate.amount}${estimate.unit || ''}`
+  if (estimate.amountCny > 0 && estimate.unit !== '元') {
+    return `${base} / 约¥${Number(estimate.amountCny).toFixed(2)}`
+  }
+  return base
+}
+
 export function getVideoModelName(model) {
   return model?.name || '当前模型'
 }

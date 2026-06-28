@@ -66,7 +66,11 @@ def should_retry_failed_provider_video_cache(task: dict | None) -> bool:
         return False
     if not str(task.get("provider") or ""):
         return False
-    return PROVIDER_VIDEO_CACHE_ERROR_PREFIX in str(task.get("error") or "")
+    error = str(task.get("error") or "")
+    return (
+        PROVIDER_VIDEO_CACHE_ERROR_PREFIX in error
+        or COMPLETED_VIDEO_MISSING_ERROR in error
+    )
 
 
 def _exception_detail(exc: Exception) -> str:

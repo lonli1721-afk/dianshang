@@ -25,6 +25,7 @@ export function DerivePanel({
   notify,
   jimengModels,
   geminiModels,
+  openaiModels = [],
   tasks = [],
   submitTask,
   taskNotice = null,
@@ -64,8 +65,12 @@ export function DerivePanel({
   const [outputMode, setOutputMode] = useState(initialWatermarkSettings.outputMode)
   const [fontUploading, setFontUploading] = useState(false)
   const modelOptions = useMemo(
-    () => (provider === DERIVE_MODELS_BY_PROVIDER.gemini ? geminiModels : jimengModels),
-    [geminiModels, jimengModels, provider],
+    () => (provider === DERIVE_MODELS_BY_PROVIDER.gemini
+      ? geminiModels
+      : provider === DERIVE_MODELS_BY_PROVIDER.openai
+        ? openaiModels
+        : jimengModels),
+    [geminiModels, jimengModels, openaiModels, provider],
   )
   const deriveResultImages = result.images || []
   const draftWatermarkSettings = normalizeWatermarkSettings({
@@ -171,10 +176,11 @@ export function DerivePanel({
   useEffect(() => {
     if (!modelOptions.length) return
     if (!modelOptions.some(item => item.id === model)) {
-      const preferred = modelOptions.find(item => item.id === 'seedream-4.5') || modelOptions[0]
+      const fallbackId = provider === DERIVE_MODELS_BY_PROVIDER.openai ? 'gpt-image-2' : 'seedream-4.5'
+      const preferred = modelOptions.find(item => item.id === fallbackId) || modelOptions[0]
       queueMicrotask(() => setModel(preferred.id))
     }
-  }, [modelOptions, model])
+  }, [modelOptions, model, provider])
 
   const runDerive = async () => {
     if (!refs.length) {
@@ -372,6 +378,7 @@ export function DerivePanel({
             <select value={provider} onChange={event => setProvider(event.target.value)}>
               <option value={DERIVE_MODELS_BY_PROVIDER.jimeng}>即梦 / Seedream</option>
               <option value={DERIVE_MODELS_BY_PROVIDER.gemini}>Gemini 图片</option>
+              <option value={DERIVE_MODELS_BY_PROVIDER.openai}>OpenAI Image</option>
             </select>
           </Field>
           <Field label="模型">

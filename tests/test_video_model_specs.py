@@ -41,8 +41,8 @@ class VideoModelSpecsTests(unittest.TestCase):
 
         seedance_15 = catalog["seedance-1.5-pro"]
         self.assertFalse(seedance_15["supports_ref_video"])
-        self.assertFalse(seedance_15["supports_ref_images"])
-        self.assertEqual(seedance_15["max_duration"], 10)
+        self.assertTrue(seedance_15["supports_ref_images"])
+        self.assertEqual(seedance_15["max_duration"], 12)
         self.assertEqual(seedance_15["price_per_second"], 0.3)
 
         self.assertEqual(catalog["viduq3-pro"]["provider"], "vidu")
@@ -84,6 +84,22 @@ class VideoModelSpecsTests(unittest.TestCase):
         self.assertEqual(happyhorse_edit["supported_modes"], ["reference_video", "advanced_video"])
         self.assertEqual(happyhorse_edit["price_billing"], "input_output")
 
+        grok_preview = catalog["grok-video-1.5-preview"]
+        self.assertEqual(grok_preview["provider"], "toapis")
+        self.assertEqual(grok_preview["price_unit"], "credits")
+        self.assertEqual(grok_preview["price_per_second"], 2)
+        self.assertEqual(grok_preview["duration_choices"], [10, 15])
+
+        toapis_seedance_15 = catalog["doubao-seedance-1-5-pro"]
+        self.assertEqual(toapis_seedance_15["provider"], "toapis")
+        self.assertEqual(toapis_seedance_15["max_ref_images"], 1)
+        self.assertEqual(toapis_seedance_15["toapis_ref_image_payload"], "image_with_roles")
+        self.assertEqual(toapis_seedance_15["toapis_ref_task_type"], "i2v")
+
+        self.assertIn("sora-2-vvip", catalog)
+        self.assertIn("Veo3.1-quality-official", catalog)
+        self.assertIn("wan2.6-flash", catalog)
+
     def test_catalog_has_unique_ids_required_fields_and_lookup(self):
         catalog = video_model_registry.get_all_video_model_specs()
         ids = [item.get("id") for item in catalog]
@@ -108,8 +124,14 @@ class VideoModelSpecsTests(unittest.TestCase):
                 self.assertTrue(required_fields.issubset(spec.keys()))
                 self.assertGreaterEqual(float(spec["max_duration"]), float(spec["min_duration"]))
                 self.assertIn(spec["default_resolution"], spec["supported_resolutions"])
-                self.assertGreater(float(spec["price_per_second"]), 0)
-                self.assertEqual(spec["price_unit"], "CNY")
+                if spec["price_unit"] == "CNY":
+                    self.assertGreater(float(spec["price_per_second"]), 0)
+                elif spec["price_unit"] == "credits":
+                    self.assertGreaterEqual(float(spec["price_per_second"]), 0)
+                    if not float(spec["price_per_second"]):
+                        self.assertEqual(spec.get("price_status"), "unpriced")
+                else:
+                    self.fail(f"unexpected price unit {spec['price_unit']}")
 
         self.assertEqual(video_model_registry.get_video_model_spec("seedance-2.0")["provider"], "jimeng")
         self.assertEqual(video_model_registry.get_video_model_spec("missing-model"), {})
@@ -131,6 +153,37 @@ class VideoModelSpecsTests(unittest.TestCase):
 
         models = video_model_registry.get_video_model_specs(provider_filter=["happyhorse"])
         self.assertEqual({item["provider"] for item in models}, {"happyhorse"})
+
+    def test_cost_estimates_convert_credits_to_cny(self):
+        catalog = video_model_registry.get_all_video_model_specs(
+            toapis_credit_prices={"veo3.1-fast": 12},
+        )
+        enriched = video_model_registry.enrich_video_model_cost_estimates(
+            catalog,
+            toapis_usd_cny_rate=7.2,
+        )
+        by_id = {item["id"]: item for item in enriched}
+
+        self.assertEqual(by_id["seedance-2.0"]["estimated_price_per_second_cny"], 1.0)
+        self.assertEqual(by_id["seedance-2.0"]["estimated_price_status"], "priced")
+        self.assertEqual(by_id["veo3.1-fast"]["estimated_price_per_second_cny"], 0.432)
+        self.assertEqual(by_id["veo3.1-fast"]["toapis_usd_cny_rate"], 7.2)
+        self.assertEqual(by_id["veo3.1-fast"]["estimated_price_status"], "priced")
+
+    def test_cost_estimates_mark_unpriced_credit_models(self):
+        catalog = video_model_registry.get_all_video_model_specs()
+        enriched = video_model_registry.enrich_video_model_cost_estimates(catalog)
+        by_id = {item["id"]: item for item in enriched}
+
+        self.assertEqual(by_id["veo3.1-fast"]["estimated_price_per_second_cny"], 0)
+        self.assertEqual(by_id["veo3.1-fast"]["estimated_price_status"], "unpriced")
+
+    def test_parse_toapis_usd_cny_rate_uses_default_for_invalid_values(self):
+        self.assertEqual(video_model_registry.parse_toapis_usd_cny_rate("7.1"), 7.1)
+        self.assertEqual(
+            video_model_registry.parse_toapis_usd_cny_rate(""),
+            video_model_registry.DEFAULT_TOAPIS_USD_CNY_RATE,
+        )
 
 
 if __name__ == "__main__":

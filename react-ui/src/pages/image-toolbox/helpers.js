@@ -1,7 +1,7 @@
 export function assetUrl(url) {
   if (!url) return ''
-  const token = window.localStorage.getItem('token') || ''
-  const needsToken = token && (url.startsWith('/api/files/') || url.includes('/api/files/'))
+  const token = typeof window !== 'undefined' ? window.localStorage.getItem('token') || '' : ''
+  const needsToken = token && (url.startsWith('/api/files/') || url.includes('/api/files/')) && !url.includes('token=')
   const authedUrl = needsToken
     ? `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
     : url

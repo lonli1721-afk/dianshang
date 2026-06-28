@@ -68,6 +68,8 @@ async def query_game_task_status(
             return terminal_result
 
     provider = meta.get("provider", "") or (gt.get("provider", "") if gt else "")
+    if not provider and str(provider_task_id or "").startswith("tsk_vid_"):
+        provider = "toapis"
     if provider and provider_task_id not in deps._video_tasks:
         deps._video_tasks[provider_task_id] = {"provider": provider}
     if not provider:

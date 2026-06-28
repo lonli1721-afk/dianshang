@@ -23,12 +23,15 @@ import {
 } from './gameVideoConstants'
 import {
   cleanImageModelLabel,
+  formatVideoCostEstimate,
   getImageQualityIds,
   getReplaceProviderSpec,
   getReplaceReferenceDurationLimits,
   getReplaceVideoBlockReason,
   getReplaceReferenceDurationHint,
+  getVideoPricePerSecondCny,
   getVideoPricePerSecond,
+  getVideoPriceUnitLabel,
   getVideoGenerationBlockReasonForModel,
   getVideoReferenceDurationHint,
   normalizeImageQualityForModel,
@@ -1294,6 +1297,8 @@ export default function GameVideoPage() {
     const m = models.find(m => m.id === scene.model)
     if (!m?.price_per_second) return null
     const pricePerSecond = getVideoPricePerSecond(m, scene)
+    const pricePerSecondCny = getVideoPricePerSecondCny(m, scene)
+    if (!pricePerSecond) return null
     const outputSeconds = m.id === 'happyhorse-1.0-video-edit'
       ? Math.min(
         Number(m.max_duration || 15),
@@ -1309,16 +1314,36 @@ export default function GameVideoPage() {
         || 0
       )
       : 0
-    return +(pricePerSecond * (outputSeconds + inputSeconds)).toFixed(2)
+    return {
+      amount: +(pricePerSecond * (outputSeconds + inputSeconds)).toFixed(2),
+      amountCny: pricePerSecondCny > 0 ? +(pricePerSecondCny * (outputSeconds + inputSeconds)).toFixed(2) : 0,
+      unit: getVideoPriceUnitLabel(m),
+      pricePerSecond,
+      pricePerSecondCny,
+      seconds: outputSeconds + inputSeconds,
+    }
   }
   const estimateTotalCost = () => {
     const pending = scenes.filter(s => s.prompt.trim() && s.status !== 'processing' && s.status !== 'generating')
-    let total = 0
+    const totals = new Map()
     for (const s of pending) {
       const c = estimateCost(s)
-      if (c != null) total += c
+      if (c?.amount > 0) {
+        const current = totals.get(c.unit) || { amount: 0, amountCny: 0 }
+        totals.set(c.unit, {
+          amount: current.amount + c.amount,
+          amountCny: current.amountCny + (c.amountCny || 0),
+        })
+      }
     }
-    return total > 0 ? +total.toFixed(2) : null
+    if (!totals.size) return null
+    return Array.from(totals.entries())
+      .map(([unit, total]) => formatVideoCostEstimate({
+        amount: +total.amount.toFixed(2),
+        amountCny: +total.amountCny.toFixed(2),
+        unit,
+      }))
+      .join(' + ')
   }
   const getModelLimitHint = useCallback((model) => {
     if (!model) return ''

@@ -66,7 +66,8 @@ export default function ImageToolboxPage() {
 
   const jimengModels = imageModels.filter(model => model.provider === DERIVE_MODELS_BY_PROVIDER.jimeng)
   const geminiModels = imageModels.filter(model => model.provider === DERIVE_MODELS_BY_PROVIDER.gemini)
-  const modelProps = { jimengModels, geminiModels }
+  const openaiModels = imageModels.filter(model => model.provider === DERIVE_MODELS_BY_PROVIDER.openai)
+  const modelProps = { jimengModels, geminiModels, openaiModels }
   const taskProps = { tasks, submitTask, taskNotice, cancelTask, deleteTask, refreshTasks }
   const locateTask = (task) => {
     if (!task?.task_id) return

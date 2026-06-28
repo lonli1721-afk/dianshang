@@ -301,6 +301,7 @@ class GameJimengService:
         image_url: str = "",
         reference_images: list[str] | None = None,
         reference_video: str = "",
+        generate_audio: bool = True,
     ) -> dict:
         model_id = VIDEO_MODELS.get(model, VIDEO_MODELS["seedance-2.0"])
         is_v2 = "seedance-2" in model
@@ -373,7 +374,7 @@ class GameJimengService:
             "resolution": normalized_resolution,
             "watermark": False,
         }
-        if is_seedance_15:
+        if is_seedance_15 or not generate_audio:
             payload["generate_audio"] = False
 
         url = f"{BASE_URL}/contents/generations/tasks"

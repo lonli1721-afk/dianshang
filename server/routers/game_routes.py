@@ -37,7 +37,13 @@ from task_record_service import (
 from task_status_service import query_game_task_status
 from task_status_http_service import batch_query_game_task_statuses, retry_game_task_result_cache
 from video_generation_validation import VideoGenerationValidationError, validate_generate_video_request
-from video_model_registry import get_video_model_spec, get_video_model_specs as _catalog_video_model_specs
+from video_model_registry import (
+    enrich_video_model_cost_estimates,
+    get_video_model_spec,
+    get_video_model_specs as _catalog_video_model_specs,
+    parse_toapis_credit_price_overrides,
+    parse_toapis_usd_cny_rate,
+)
 
 logger = logging.getLogger("game")
 router = APIRouter()
@@ -63,8 +69,11 @@ PROMPT_CHINESE_OUTPUT_RULES = """
 - 不要输出英文句子、英文镜头提示词、英文标题或英文解释。
 - 如果参考图或视频里有英文字幕、英文 UI，只能用中文描述其含义，不要照抄英文。
 - 可保留 3D、UI、IP、A/B、16:9、9:16、720p、1080p 这类行业符号或规格；除此之外的用户可见内容必须是中文。
+- 视频声音硬性规则：生成单段视频时不要旁白、配音、人声或口播；不要背景音乐、BGM、配乐、音乐节奏或鼓点；不要唱歌、吟唱、Rap、歌词化表达或音乐化念白；只允许真实现场音效。
 - 只返回可直接使用的提示词正文，不要返回标题、说明、Markdown 或 JSON。
 """.strip()
+
+VIDEO_SOUND_RULE = "【声音规则】生成单段视频时不要旁白、配音、人声或口播；不要唱歌、吟唱、Rap、歌词化表达或音乐化念白；不要背景音乐、BGM、配乐、音乐节奏或鼓点；只保留真实现场音效，例如脚步声、风声、水花声、材质与地面轻微摩擦声。"
 
 
 class GameChineseOutputError(ValueError):
@@ -94,6 +103,52 @@ def _ensure_chinese_prompt_output(value: str, context: str) -> None:
 def _chinese_prompt_request(*parts: str) -> str:
     body = "\n\n".join(str(part or "").strip() for part in parts if str(part or "").strip())
     return f"{PROMPT_CHINESE_OUTPUT_RULES}\n\n{body}".strip()
+
+
+def _normalize_video_sound_prompt(prompt: str) -> str:
+    text = str(prompt or "").strip()
+    if not text:
+        return VIDEO_SOUND_RULE
+    stale_blocks = [
+        r"【声音规则】[^。]*。?",
+        r"声音规则[:：][^。]*。?",
+        r"【声音限制】[^。]*(?:背景音乐|BGM|bgm|配乐|音乐节奏|轻音乐|鼓点|现场音效|旁白)[^。]*。?",
+        r"【声音限制】不要生成[^。]*(?:旁白|配音|语音音轨)[^。]*。?",
+        r"【旁白】[\s\S]*?(?=【|$)",
+        r"旁白(?:内容)?[:：]\s*[“\"']?[^。；\n”\"']+[”\"']?(?:[。；\n]|$)",
+        r"加入一条[^。；\n]*(?:旁白|配音|口播|人声)[^。；\n]*(?:[。；\n]|$)",
+        r"声音只能由真实现场音效和一条普通话广告旁白组成[^。；\n]*(?:[。；\n]|$)",
+        r"不要生成[^。；]*(?:旁白|配音|语音音轨)[^。；]*(?:[。；]|$)",
+        r"不要出现[^。；]*(?:说话的人|主播|口播)[^。；]*(?:[。；]|$)",
+        r"只保留真实现场环境音[^。；]*(?:[。；]|$)",
+        r"不要(?:生成|出现|加入|使用|有)?[^。；]*(?:背景音乐|BGM|bgm|配乐|音乐节奏|轻音乐|鼓点)[^。；]*(?:[。；]|$)",
+    ]
+    for pattern in stale_blocks:
+        text = re.sub(pattern, "", text)
+    replacements = {
+        "普通话广告旁白": "",
+        "品牌广告解说": "",
+        "配音": "",
+        "人声解说": "",
+        "口播": "",
+        "主播声音": "",
+        "低频户外广告鼓点": "现场音效",
+        "低频鼓点": "现场音效",
+        "音乐节奏": "现场音效",
+        "轻音乐节奏": "现场音效",
+        "背景音乐": "现场音效",
+        "轻音乐": "现场音效",
+        "配乐": "现场音效",
+        "BGM": "现场音效",
+        "bgm": "现场音效",
+        "鼓点": "现场音效",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    text = re.sub(r"\s+", " ", text).strip()
+    if VIDEO_SOUND_RULE not in text:
+        text = f"{text} {VIDEO_SOUND_RULE}".strip()
+    return text
 
 
 def _env_key(name: str) -> str:
@@ -540,7 +595,14 @@ async def _ensure_game_task_record(task_id: str, payload: dict) -> str:
 def _operation_error_text(exc: Exception) -> str:
     if isinstance(exc, HTTPException):
         return str(exc.detail or exc.status_code)
-    return str(exc)
+    message = str(exc or "").strip()
+    if message:
+        return message
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    cause_message = str(cause or "").strip()
+    if cause_message:
+        return cause_message
+    return exc.__class__.__name__ or "Unknown error"
 
 
 def _friendly_ai_error(exc: Exception) -> str:
@@ -691,6 +753,7 @@ class GenerateVideoRequest(BaseModel):
     scene_refs: list[str] = Field(default_factory=list)
     reference_video_url: str = ""
     advanced_reference_videos: list[str] = Field(default_factory=list)
+    generate_audio: bool = True
 
 class ReplaceVideoRequest(BaseModel):
     project_id: str = ""
@@ -1066,6 +1129,28 @@ async def generate_asset_image(req: GenerateAssetImageRequest):
                 ),
             )
             result = await asyncio.to_thread(deps.save_gemini_image_result, result)
+        elif req.provider == "openai_image":
+            svc = _openai()
+            if not svc:
+                raise Exception("OpenAI API key is not configured")
+            ref_images = []
+            for url in req.reference_urls:
+                media_bytes, mime, _ext = await _read_reference_media(url, "image")
+                ref_images.append((media_bytes, mime))
+            result = await _provider_call(
+                "openai_image",
+                "generate_image",
+                lambda: svc.generate_image(
+                    prompt=prompt,
+                    model=req.model or "gpt-image-2",
+                    width=image_width,
+                    height=image_height,
+                    reference_images=ref_images,
+                    quality=req.image_quality,
+                ),
+            )
+            if any(item.get("data") for item in result.get("images") or []):
+                result = await asyncio.to_thread(deps.save_base64_image_result, result, "openai")
         else:
             raise Exception(f"不支持的图片服务商: {req.provider}")
 
@@ -1098,6 +1183,9 @@ async def list_image_models():
     if _ai():
         from ai_service import GEMINI_IMAGE_MODELS
         models.extend(GEMINI_IMAGE_MODELS)
+    if _openai():
+        from openai_service import OPENAI_IMAGE_MODELS
+        models.extend(OPENAI_IMAGE_MODELS)
     return {"models": models}
 
 
@@ -1464,22 +1552,34 @@ async def generate_video(req: GenerateVideoRequest):
                 raise HTTPException(404, "Project not found")
 
         provider = req.provider
+        if not str(req.prompt or "").strip():
+            raise HTTPException(400, "请输入视频提示词。")
+        video_prompt = _normalize_video_sound_prompt(req.prompt)
         svc = _game_video_svc() if provider == "jimeng" else None
-        advanced_reference_videos = [url for url in (req.advanced_reference_videos or []) if url]
+        advanced_reference_videos = [str(url or "").strip() for url in (req.advanced_reference_videos or []) if str(url or "").strip()]
         if len(advanced_reference_videos) > 3:
             raise HTTPException(400, "高级视频编辑最多支持 3 个参考视频。")
 
         resolved_image = ""
-        if req.image_url:
-            resolved_image = await _resolve_provider_image_reference(req.image_url, provider)
+        image_url_input = str(req.image_url or "").strip()
+        if image_url_input:
+            resolved_image = str(await _resolve_provider_image_reference(image_url_input, provider) or "").strip()
 
         resolved_char_refs = []
         for url in req.character_refs:
-            resolved_char_refs.append(await _resolve_provider_image_reference(url, provider))
+            clean_url = str(url or "").strip()
+            if clean_url:
+                resolved = str(await _resolve_provider_image_reference(clean_url, provider) or "").strip()
+                if resolved:
+                    resolved_char_refs.append(resolved)
 
         resolved_scene_refs = []
         for url in req.scene_refs:
-            resolved_scene_refs.append(await _resolve_provider_image_reference(url, provider))
+            clean_url = str(url or "").strip()
+            if clean_url:
+                resolved = str(await _resolve_provider_image_reference(clean_url, provider) or "").strip()
+                if resolved:
+                    resolved_scene_refs.append(resolved)
 
         all_ref_images = resolved_char_refs + resolved_scene_refs
         resolved_reference_video = ""
@@ -1508,7 +1608,7 @@ async def generate_video(req: GenerateVideoRequest):
                     "jimeng",
                     "edit_video",
                     lambda: svc.edit_video(
-                        prompt=req.prompt,
+                        prompt=video_prompt,
                         model=model,
                         ratio=req.aspect_ratio,
                         duration=req.duration,
@@ -1547,17 +1647,18 @@ async def generate_video(req: GenerateVideoRequest):
                     "jimeng",
                     "generate_video",
                     lambda: svc.generate_video(
-                        prompt=req.prompt, model=model,
+                        prompt=video_prompt, model=model,
                         ratio=req.aspect_ratio,
                         duration=req.duration, resolution=req.resolution, image_url=seedance_first_frame,
                         reference_images=seedance_ref_images if seedance_ref_images else None,
                         reference_video=resolved_reference_video,
+                        generate_audio=req.generate_audio,
                     ),
                 )
             deps._video_tasks[result["task_id"]] = {**result, "provider": "jimeng"}
             task_record_payload = build_generate_task_record_payload(
                 project_id=req.project_id,
-                prompt=req.prompt,
+                prompt=video_prompt,
                 model=model,
                 provider="jimeng",
                 character_refs=req.character_refs,
@@ -1583,7 +1684,7 @@ async def generate_video(req: GenerateVideoRequest):
                     "vidu",
                     "image_to_video",
                     lambda: svc.image_to_video(
-                        image_url=first_ref, prompt=req.prompt,
+                        image_url=first_ref, prompt=video_prompt,
                         model=model,
                         duration=req.duration, resolution=req.resolution,
                     ),
@@ -1593,7 +1694,7 @@ async def generate_video(req: GenerateVideoRequest):
                     "vidu",
                     "text_to_video",
                     lambda: svc.text_to_video(
-                        prompt=req.prompt, model=model,
+                        prompt=video_prompt, model=model,
                         duration=req.duration, resolution=req.resolution,
                         aspect_ratio=req.aspect_ratio,
                     ),
@@ -1601,7 +1702,7 @@ async def generate_video(req: GenerateVideoRequest):
             deps._video_tasks[result["task_id"]] = {**result, "provider": "vidu"}
             task_record_payload = build_generate_task_record_payload(
                 project_id=req.project_id,
-                prompt=req.prompt,
+                prompt=video_prompt,
                 model=model,
                 provider="vidu",
                 character_refs=req.character_refs,
@@ -1628,7 +1729,7 @@ async def generate_video(req: GenerateVideoRequest):
                     "edit_video",
                     lambda: svc.edit_video(
                         video_url=edit_video_url,
-                        prompt=req.prompt,
+                        prompt=video_prompt,
                         reference_images=all_ref_images[:5],
                         model=model,
                         resolution=req.resolution,
@@ -1644,7 +1745,7 @@ async def generate_video(req: GenerateVideoRequest):
                     "reference_to_video",
                     lambda: svc.reference_to_video(
                         reference_images=all_ref_images[:9],
-                        prompt=req.prompt,
+                        prompt=video_prompt,
                         model=model,
                         duration=req.duration,
                         resolution=req.resolution,
@@ -1663,7 +1764,7 @@ async def generate_video(req: GenerateVideoRequest):
                     "image_to_video",
                     lambda: svc.image_to_video(
                         image_url=first_ref,
-                        prompt=req.prompt,
+                        prompt=video_prompt,
                         model=model,
                         duration=req.duration,
                         resolution=req.resolution,
@@ -1674,7 +1775,7 @@ async def generate_video(req: GenerateVideoRequest):
                     "happyhorse",
                     "text_to_video",
                     lambda: svc.text_to_video(
-                        prompt=req.prompt,
+                        prompt=video_prompt,
                         model=model,
                         duration=req.duration,
                         resolution=req.resolution,
@@ -1684,7 +1785,7 @@ async def generate_video(req: GenerateVideoRequest):
             deps._video_tasks[result["task_id"]] = {**result, "provider": "happyhorse"}
             task_record_payload = build_generate_task_record_payload(
                 project_id=req.project_id,
-                prompt=req.prompt,
+                prompt=video_prompt,
                 model=model,
                 provider="happyhorse",
                 character_refs=req.character_refs,
@@ -1702,26 +1803,37 @@ async def generate_video(req: GenerateVideoRequest):
             if not svc:
                 raise Exception("ToAPIs API key is not configured")
             if resolved_reference_video or advanced_reference_videos:
-                raise Exception("ToAPIs Veo 3.1 暂不支持参考视频，请使用文字或参考图生成。")
+                raise Exception("当前 ToAPIs 视频模型暂不支持参考视频，请使用文字或参考图生成。")
             model = validation.model_spec["id"]
-            raw_refs = [url for url in [req.image_url, *req.character_refs, *req.scene_refs] if url]
+            raw_refs = [str(url or "").strip() for url in [req.image_url, *req.character_refs, *req.scene_refs] if str(url or "").strip()]
             image_urls = []
-            for url in raw_refs[:3]:
-                image_urls.append(await _resolve_toapis_image_reference(url, svc))
+            max_refs = int(validation.model_spec.get("max_ref_images") or 3)
+            for url in raw_refs[:max_refs]:
+                resolved_ref = str(await _resolve_toapis_image_reference(url, svc) or "").strip()
+                if resolved_ref:
+                    image_urls.append(resolved_ref)
+            min_refs = int(validation.model_spec.get("min_ref_images") or 0)
+            if min_refs > 0 and len(image_urls) < min_refs:
+                raise HTTPException(400, f"{validation.model_spec.get('name') or model} 需要至少 {min_refs} 张有效参考图，请重新上传分镜图后再试。")
+            if raw_refs and not image_urls:
+                raise HTTPException(400, "ToAPIs 参考图解析失败：当前分镜图没有得到可提交的公网图片地址，请重新上传或重新生成分镜图后再试。")
             result = await _provider_call(
                 "toapis",
                 "generate_video",
                 lambda: svc.generate_video(
-                    prompt=req.prompt,
+                    prompt=video_prompt,
                     model=model,
                     aspect_ratio=req.aspect_ratio,
+                    duration=req.duration,
+                    resolution=req.resolution,
                     image_urls=image_urls,
+                    generate_audio=req.generate_audio,
                 ),
             )
             deps._video_tasks[result["task_id"]] = {**result, "provider": "toapis"}
             task_record_payload = build_generate_task_record_payload(
                 project_id=req.project_id,
-                prompt=req.prompt,
+                prompt=video_prompt,
                 model=model,
                 provider="toapis",
                 character_refs=req.character_refs,
@@ -1769,6 +1881,7 @@ async def replace_video(req: ReplaceVideoRequest):
             raise Exception("Character image is required")
 
         provider = req.provider or "jimeng"
+        video_prompt = _normalize_video_sound_prompt(req.prompt or "动作模仿")
 
         if provider == "wan":
             svc = _wan()
@@ -1791,7 +1904,7 @@ async def replace_video(req: ReplaceVideoRequest):
             deps._video_tasks[result["task_id"]] = {**result, "provider": "wan"}
             task_record_payload = build_replace_task_record_payload(
                 project_id=req.project_id,
-                prompt=req.prompt or "万相换人",
+                prompt=video_prompt,
                 model="wan2.2-animate-mix",
                 provider="wan",
                 character_ref=req.character_ref,
@@ -1817,14 +1930,14 @@ async def replace_video(req: ReplaceVideoRequest):
                 lambda: svc.motion_transfer(
                     image_url=image_url,
                     video_url=video_url,
-                    prompt=req.prompt,
+                    prompt=video_prompt,
                     resolution=req.resolution,
                 ),
             )
             deps._video_tasks[result["task_id"]] = {**result, "provider": "jimeng"}
             task_record_payload = build_replace_task_record_payload(
                 project_id=req.project_id,
-                prompt=req.prompt or "Seedance 动作模仿",
+                prompt=video_prompt,
                 model="seedance-2.0",
                 provider="jimeng",
                 character_ref=req.character_ref,
@@ -1930,13 +2043,30 @@ def get_video_model_specs() -> list[dict]:
         available_providers.add("happyhorse")
     if _toapis():
         available_providers.add("toapis")
-    return _catalog_video_model_specs(provider_filter=available_providers)
+    price_overrides = parse_toapis_credit_price_overrides(
+        deps.settings_manager.get("toapis_video_credit_prices", "")
+        if getattr(deps, "settings_manager", None)
+        else ""
+    )
+    models = _catalog_video_model_specs(
+        provider_filter=available_providers,
+        toapis_credit_prices=price_overrides,
+    )
+    usd_cny_rate = parse_toapis_usd_cny_rate(
+        deps.settings_manager.get("toapis_usd_cny_rate", "")
+        if getattr(deps, "settings_manager", None)
+        else ""
+    )
+    return enrich_video_model_cost_estimates(models, toapis_usd_cny_rate=usd_cny_rate)
 
 
 async def _snapshot_completed_task_billing(gt: dict, result: dict):
     """Persist billing at completion time so deleted projects/files do not erase usage cost."""
     model = gt.get("model", "")
     spec = get_video_model_spec(model)
+    if (spec.get("price_unit") or "CNY").upper() != "CNY":
+        await _db_call(db.update_game_task, gt["id"], billing_status="non_cny")
+        return
     try:
         price = float(spec.get("price_per_second") or 0)
     except (TypeError, ValueError):

@@ -43,7 +43,11 @@ const inferRoleSuggestionTopic = (value = '') => {
 }
 
 const defaultGenerateModelForProvider = (provider) => (
-  provider === 'gemini_image' ? 'gemini-3.1-flash-image-preview' : 'seedream-4.5'
+  provider === 'gemini_image'
+    ? 'gemini-3.1-flash-image-preview'
+    : provider === 'openai_image'
+      ? 'gpt-image-2'
+      : 'seedream-4.5'
 )
 
 const PROGRESSIVE_IMAGE_CONCURRENCY = 3
@@ -154,6 +158,7 @@ export function WatermarkPanel({
   notify,
   jimengModels = [],
   geminiModels = [],
+  openaiModels = [],
   modelsLoaded = true,
   tasks = [],
   submitTask,
@@ -232,8 +237,13 @@ export function WatermarkPanel({
     outputMode,
   })
 
-  const generateProviderModels = generateProvider === 'gemini_image' ? geminiModels : jimengModels
+  const generateProviderModels = generateProvider === 'gemini_image'
+    ? geminiModels
+    : generateProvider === 'openai_image'
+      ? openaiModels
+      : jimengModels
   const generateProviderLabel = generateProvider === 'gemini_image' ? 'Gemini 图片' : '即梦 / Seedream'
+  const resolvedGenerateProviderLabel = generateProvider === 'openai_image' ? 'OpenAI Image' : generateProviderLabel
   const generateProviderReady = generateProviderModels.length > 0
   const selectedSlotImages = useMemo(() => selectedSlots.filter(Boolean), [selectedSlots])
   const selectedSlotUrls = useMemo(() => selectedSlotImages.map(item => item.url), [selectedSlotImages])
@@ -474,7 +484,11 @@ export function WatermarkPanel({
   }, [showPanelNotice])
 
   useEffect(() => {
-    const models = generateProvider === 'gemini_image' ? geminiModels : jimengModels
+    const models = generateProvider === 'gemini_image'
+      ? geminiModels
+      : generateProvider === 'openai_image'
+        ? openaiModels
+        : jimengModels
     const fallbackModel = defaultGenerateModelForProvider(generateProvider)
     if (modelsLoaded && generateProvider === 'gemini_image' && !models.length && jimengModels.length) {
       setGenerateProvider('jimeng')
@@ -487,7 +501,7 @@ export function WatermarkPanel({
     } else if (modelsLoaded && !models.length && generateModel !== fallbackModel) {
       setGenerateModel(fallbackModel)
     }
-  }, [generateProvider, generateModel, jimengModels, geminiModels, modelsLoaded])
+  }, [generateProvider, generateModel, jimengModels, geminiModels, openaiModels, modelsLoaded])
 
   const setFinalResult = (result) => updateWorkspace(prev => ({ ...prev, finalResult: result }))
 
@@ -939,7 +953,7 @@ export function WatermarkPanel({
       return
     }
     if (!generateProviderReady) {
-      showPanelNotice(`${generateProviderLabel}还没有配置 API Key，请先到设置里配置，或切换生图平台。`, 'error', 'generate')
+      showPanelNotice(`${resolvedGenerateProviderLabel}还没有配置 API Key，请先到设置里配置，或切换生图平台。`, 'error', 'generate')
       return
     }
 
@@ -1023,7 +1037,7 @@ export function WatermarkPanel({
       return
     }
     if (!generateProviderReady) {
-      showPanelNotice(`${generateProviderLabel}还没有配置 API Key，请先到设置里配置，或切换生图平台。`, 'error', 'generate_roles')
+      showPanelNotice(`${resolvedGenerateProviderLabel}还没有配置 API Key，请先到设置里配置，或切换生图平台。`, 'error', 'generate_roles')
       return
     }
     setGenerating(true)
@@ -1515,6 +1529,7 @@ export function WatermarkPanel({
                 <select value={generateProvider} onChange={event => setGenerateProvider(event.target.value)}>
                   <option value="jimeng">即梦 / Seedream</option>
                   <option value="gemini_image">Gemini 图片</option>
+                  <option value="openai_image">OpenAI Image</option>
                 </select>
               </Field>
               <Field label="可用模型">
@@ -1523,7 +1538,7 @@ export function WatermarkPanel({
                     <option key={model.id} value={model.id}>{model.name || model.id}</option>
                   ))}
                   {!generateProviderModels.length && (
-                    <option value={generateModel}>{modelsLoaded ? `${generateProviderLabel}未配置 API Key` : '模型加载中'}</option>
+                    <option value={generateModel}>{modelsLoaded ? `${resolvedGenerateProviderLabel}未配置 API Key` : '模型加载中'}</option>
                   )}
                 </select>
               </Field>
@@ -1571,6 +1586,7 @@ export function WatermarkPanel({
                 <select value={generateProvider} onChange={event => setGenerateProvider(event.target.value)}>
                   <option value="jimeng">即梦 / Seedream</option>
                   <option value="gemini_image">Gemini 图片</option>
+                  <option value="openai_image">OpenAI Image</option>
                 </select>
               </Field>
               <Field label="可用模型">
@@ -1579,7 +1595,7 @@ export function WatermarkPanel({
                     <option key={model.id} value={model.id}>{model.name || model.id}</option>
                   ))}
                   {!generateProviderModels.length && (
-                    <option value={generateModel}>{modelsLoaded ? `${generateProviderLabel}未配置 API Key` : '模型加载中'}</option>
+                    <option value={generateModel}>{modelsLoaded ? `${resolvedGenerateProviderLabel}未配置 API Key` : '模型加载中'}</option>
                   )}
                 </select>
               </Field>

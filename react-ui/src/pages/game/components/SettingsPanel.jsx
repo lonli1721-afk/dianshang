@@ -8,7 +8,7 @@ const SETTINGS_FIELDS = [
   { key: 'game_dashscope_api_key', label: 'DashScope API Key（万相 / HappyHorse）', desc: '用于阿里云万相视频换人，以及 HappyHorse 视频生成与编辑', color: '#3b82f6' },
   { key: 'game_toapis_api_key', label: 'ToAPIs API Key（Veo 3.1）', desc: '用于 ToAPIs 的 veo3.1-fast / veo3.1-lite / veo3.1-quality 视频生成', color: '#14b8a6' },
   { key: 'game_toapis_base_url', label: 'ToAPIs Base URL（可选）', desc: '默认 https://toapis.com，只有使用自建或代理地址时需要填写', color: '#14b8a6' },
-  { key: 'game_doubao_speech_api_key', label: '豆包语音 API Key（语音识别 / ASR）', desc: '电商素材平台专用直播转写 Key；未配置时回退到系统全局豆包语音 API Key', color: '#f97316' },
+  { key: 'game_doubao_speech_api_key', label: '豆包语音 API Key（ASR / 语音合成 2.0）', desc: '电商素材平台专用直播转写和完整视频旁白配音 Key；未配置时回退到系统全局豆包语音 API Key', color: '#f97316' },
 ]
 
 export default function SettingsPanel({

@@ -116,6 +116,8 @@ def validate_generate_video_request(
     max_ref_images = int(spec.get("max_ref_images") or 0)
     if max_ref_images > 0:
         counted_images = total_image_inputs if spec.get("provider") == "vidu" or model_id == "happyhorse-1.0-i2v" else ref_image_count
+        if spec.get("provider") == "toapis":
+            counted_images = total_image_inputs
         if counted_images > max_ref_images:
             raise VideoGenerationValidationError(
                 f"{spec.get('name') or model_id} 最多支持 {max_ref_images} 张参考图，请减少后重试。"
@@ -131,4 +133,7 @@ def validate_generate_video_request(
         raise VideoGenerationValidationError("HappyHorse 首帧图生视频需要至少 1 张参考图。")
     if model_id == "happyhorse-1.0-r2v" and ref_image_count < 1:
         raise VideoGenerationValidationError("HappyHorse 参考图生视频需要至少 1 张角色/场景参考图。")
+    min_ref_images = int(spec.get("min_ref_images") or 0)
+    if spec.get("provider") == "toapis" and min_ref_images > 0 and total_image_inputs < min_ref_images:
+        raise VideoGenerationValidationError(f"{spec.get('name') or model_id} 需要至少 {min_ref_images} 张参考图。")
     return VideoGenerationValidationResult(model_spec=spec, mode=mode)

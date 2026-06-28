@@ -1,27 +1,55 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import gzip
 import json
 import logging
+import os
 import shutil
+import struct
 import subprocess
 import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 
 logger = logging.getLogger("doubao_speech")
 
 DOUBAO_ASR_WS_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream"
 DOUBAO_ASR_RESOURCE_ID = "volc.seedasr.sauc.duration"
+DOUBAO_TTS_WS_URL = os.environ.get(
+    "DOUBAO_TTS_2_0_WS_URL",
+    os.environ.get("DOUBAO_TTS_2_0_URL", "wss://openspeech.bytedance.com/api/v3/tts/bidirection"),
+)
+DOUBAO_TTS_RESOURCE_ID = os.environ.get("DOUBAO_TTS_2_0_RESOURCE_ID", "seed-tts-2.0")
+DOUBAO_TTS_VOICE_TYPE = os.environ.get("DOUBAO_TTS_2_0_VOICE_TYPE", "zh_female_gaolengyujie_uranus_bigtts")
 SAMPLE_RATE = 16000
 CHANNELS = 1
 BYTES_PER_SAMPLE = 2
 CHUNK_MS = 200
 CHUNK_BYTES = int(SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE * CHUNK_MS / 1000)
 SEND_SLEEP_SECONDS = 0.04
+TTS_MSG_FULL_CLIENT = 0x01
+TTS_MSG_FULL_SERVER = 0x09
+TTS_MSG_AUDIO_SERVER = 0x0B
+TTS_MSG_ERROR = 0x0F
+TTS_FLAG_WITH_EVENT = 0x04
+TTS_EVENT_START_CONNECTION = 1
+TTS_EVENT_FINISH_CONNECTION = 2
+TTS_EVENT_CONNECTION_STARTED = 50
+TTS_EVENT_CONNECTION_FAILED = 51
+TTS_EVENT_CONNECTION_FINISHED = 52
+TTS_EVENT_START_SESSION = 100
+TTS_EVENT_FINISH_SESSION = 102
+TTS_EVENT_SESSION_STARTED = 150
+TTS_EVENT_SESSION_FINISHED = 152
+TTS_EVENT_SESSION_FAILED = 153
+TTS_EVENT_TASK_REQUEST = 200
+TTS_EVENT_TTS_RESPONSE = 352
 
 
 class DoubaoSpeechError(RuntimeError):
@@ -207,6 +235,260 @@ def _collect_payload_text(payload: Any, segment_map: dict[tuple[Any, Any, str], 
             }
 
     return str(result.get("text") or "").strip()
+
+
+def _extract_tts_audio_bytes(payload: Any) -> bytes:
+    if isinstance(payload, (bytes, bytearray)):
+        return bytes(payload)
+    if not isinstance(payload, dict):
+        raise DoubaoSpeechError("豆包语音合成返回格式无法解析。")
+    code = payload.get("code")
+    if code not in (None, 0, 3000, "0", "3000"):
+        message = payload.get("message") or payload.get("msg") or payload.get("error") or "语音合成失败"
+        raise DoubaoSpeechError(f"豆包语音合成失败：{message}")
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    candidates = [
+        payload.get("data"),
+        payload.get("audio"),
+        result.get("audio"),
+        result.get("data"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            try:
+                return base64.b64decode(candidate)
+            except Exception as exc:
+                raise DoubaoSpeechError("豆包语音合成返回的音频数据不是有效 Base64。") from exc
+        if isinstance(candidate, (bytes, bytearray)):
+            return bytes(candidate)
+    raise DoubaoSpeechError("豆包语音合成未返回音频数据。")
+
+
+def _pack_tts_client_event(event: int, payload: dict[str, Any] | None = None, *, session_id: str = "") -> bytes:
+    raw_payload = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
+    data = bytearray()
+    data.extend(bytes([
+        (0x01 << 4) | 0x01,
+        (TTS_MSG_FULL_CLIENT << 4) | TTS_FLAG_WITH_EVENT,
+        (0x01 << 4) | 0x00,
+        0x00,
+    ]))
+    data.extend(struct.pack(">i", event))
+    if event not in (TTS_EVENT_START_CONNECTION, TTS_EVENT_FINISH_CONNECTION):
+        session_bytes = session_id.encode("utf-8")
+        data.extend(struct.pack(">I", len(session_bytes)))
+        data.extend(session_bytes)
+    data.extend(struct.pack(">I", len(raw_payload)))
+    data.extend(raw_payload)
+    return bytes(data)
+
+
+def _unpack_tts_server_message(data: bytes) -> dict[str, Any]:
+    if not isinstance(data, (bytes, bytearray)):
+        raise DoubaoSpeechError("豆包语音合成返回了非二进制 WebSocket 消息。")
+    raw = bytes(data)
+    if len(raw) < 8:
+        raise DoubaoSpeechError("豆包语音合成返回数据过短，无法解析。")
+
+    header_size = (raw[0] & 0x0F) * 4
+    msg_type = raw[1] >> 4
+    flags = raw[1] & 0x0F
+    offset = header_size
+    result: dict[str, Any] = {"msg_type": msg_type, "flag": flags, "event": 0, "payload": b""}
+
+    if flags == TTS_FLAG_WITH_EVENT:
+        if len(raw) < offset + 4:
+            raise DoubaoSpeechError("豆包语音合成返回结果缺少事件类型。")
+        event = struct.unpack(">i", raw[offset:offset + 4])[0]
+        offset += 4
+        result["event"] = event
+        if event not in (
+            TTS_EVENT_CONNECTION_STARTED,
+            TTS_EVENT_CONNECTION_FAILED,
+            TTS_EVENT_CONNECTION_FINISHED,
+        ):
+            if len(raw) < offset + 4:
+                raise DoubaoSpeechError("豆包语音合成返回结果缺少 session_id 长度。")
+            session_size = struct.unpack(">I", raw[offset:offset + 4])[0]
+            offset += 4
+            if session_size:
+                result["session_id"] = raw[offset:offset + session_size].decode("utf-8", errors="replace")
+                offset += session_size
+        if event in (
+            TTS_EVENT_CONNECTION_STARTED,
+            TTS_EVENT_CONNECTION_FAILED,
+            TTS_EVENT_CONNECTION_FINISHED,
+        ):
+            if len(raw) >= offset + 4:
+                connect_size = struct.unpack(">I", raw[offset:offset + 4])[0]
+                offset += 4
+                if connect_size:
+                    result["connect_id"] = raw[offset:offset + connect_size].decode("utf-8", errors="replace")
+                    offset += connect_size
+
+    if msg_type == TTS_MSG_ERROR:
+        if len(raw) >= offset + 4:
+            result["error_code"] = struct.unpack(">I", raw[offset:offset + 4])[0]
+            offset += 4
+
+    if len(raw) < offset + 4:
+        return result
+    payload_size = struct.unpack(">I", raw[offset:offset + 4])[0]
+    offset += 4
+    payload = raw[offset:offset + payload_size] if payload_size else b""
+    result["payload"] = payload
+
+    if msg_type in (TTS_MSG_FULL_SERVER, TTS_MSG_ERROR) and payload:
+        try:
+            result["json"] = json.loads(payload.decode("utf-8"))
+        except Exception:
+            result["text"] = payload.decode("utf-8", errors="replace")
+    return result
+
+
+async def _wait_tts_event(ws: Any, expected_event: int) -> dict[str, Any]:
+    while True:
+        msg = _unpack_tts_server_message(await ws.recv())
+        event = int(msg.get("event") or 0)
+        if int(msg.get("msg_type") or 0) == TTS_MSG_ERROR:
+            detail = msg.get("json") or msg.get("text") or msg.get("payload") or ""
+            raise DoubaoSpeechError(f"豆包语音合成返回错误：{detail}")
+        if event in (TTS_EVENT_CONNECTION_FAILED, TTS_EVENT_SESSION_FAILED):
+            detail = msg.get("json") or msg.get("text") or msg.get("payload") or ""
+            raise DoubaoSpeechError(f"豆包语音合成会话失败：{detail}")
+        if event == expected_event:
+            return msg
+
+
+async def synthesize_speech_2_0_file(
+    *,
+    api_key: str,
+    text: str,
+    output_path: Path,
+    voice_type: str = "",
+    speed_ratio: float = 1.0,
+    encoding: str = "mp3",
+    endpoint: str = "",
+    resource_id: str = "",
+    cluster: str = "",
+) -> dict[str, Any]:
+    api_key = (api_key or "").strip()
+    clean_text = str(text or "").strip()
+    if not api_key:
+        raise DoubaoSpeechError("豆包语音 API Key 未配置，无法生成旁白配音。")
+    if not clean_text:
+        raise DoubaoSpeechError("旁白文案为空，无法生成配音。")
+
+    import websockets
+
+    connect_id = str(uuid.uuid4())
+    session_id = str(uuid.uuid4())
+    speaker = (voice_type or DOUBAO_TTS_VOICE_TYPE).strip()
+    tts_resource_id = (resource_id or DOUBAO_TTS_RESOURCE_ID or "seed-tts-2.0").strip()
+    headers = {
+        "X-Api-Key": api_key,
+        "X-Api-Resource-Id": tts_resource_id,
+        "X-Api-Connect-Id": connect_id,
+        "X-Control-Require-Usage-Tokens-Return": "*",
+    }
+    session_request = {
+        "event": TTS_EVENT_START_SESSION,
+        "req_params": {
+            "speaker": speaker,
+            "audio_params": {
+                "format": encoding or "mp3",
+                "sample_rate": 24000,
+                "bit_rate": 128000,
+                "speech_rate": round((max(0.6, min(1.4, float(speed_ratio or 1.0))) - 1.0) * 100),
+            },
+        },
+    }
+
+    audio_data = bytearray()
+    last_payload: Any = None
+    try:
+        async with websockets.connect(
+            endpoint or DOUBAO_TTS_WS_URL,
+            additional_headers=headers,
+            open_timeout=20,
+            close_timeout=10,
+            max_size=12 * 1024 * 1024,
+            ping_interval=None,
+        ) as ws:
+            await ws.send(_pack_tts_client_event(TTS_EVENT_START_CONNECTION))
+            await _wait_tts_event(ws, TTS_EVENT_CONNECTION_STARTED)
+
+            await ws.send(_pack_tts_client_event(TTS_EVENT_START_SESSION, session_request, session_id=session_id))
+            await _wait_tts_event(ws, TTS_EVENT_SESSION_STARTED)
+
+            async def _send_text() -> None:
+                for char in clean_text:
+                    if not char:
+                        continue
+                    payload = {
+                        "event": TTS_EVENT_TASK_REQUEST,
+                        "req_params": {
+                            "speaker": speaker,
+                            "audio_params": session_request["req_params"]["audio_params"],
+                            "text": char,
+                        },
+                    }
+                    await ws.send(_pack_tts_client_event(TTS_EVENT_TASK_REQUEST, payload, session_id=session_id))
+                    await asyncio.sleep(0.005)
+                await ws.send(_pack_tts_client_event(TTS_EVENT_FINISH_SESSION, {}, session_id=session_id))
+
+            send_task = asyncio.create_task(_send_text())
+            try:
+                while True:
+                    msg = _unpack_tts_server_message(await ws.recv())
+                    event = int(msg.get("event") or 0)
+                    msg_type = int(msg.get("msg_type") or 0)
+                    if msg_type == TTS_MSG_ERROR:
+                        detail = msg.get("json") or msg.get("text") or msg.get("payload") or ""
+                        raise DoubaoSpeechError(f"豆包语音合成返回错误：{detail}")
+                    if event in (TTS_EVENT_CONNECTION_FAILED, TTS_EVENT_SESSION_FAILED):
+                        detail = msg.get("json") or msg.get("text") or msg.get("payload") or ""
+                        raise DoubaoSpeechError(f"豆包语音合成会话失败：{detail}")
+                    if msg_type == TTS_MSG_AUDIO_SERVER:
+                        audio_data.extend(msg.get("payload") or b"")
+                    elif msg_type == TTS_MSG_FULL_SERVER:
+                        last_payload = msg.get("json") or msg.get("text") or msg.get("payload")
+                        if event == TTS_EVENT_SESSION_FINISHED:
+                            break
+                await send_task
+            finally:
+                if not send_task.done():
+                    send_task.cancel()
+            await ws.send(_pack_tts_client_event(TTS_EVENT_FINISH_CONNECTION))
+            try:
+                await _wait_tts_event(ws, TTS_EVENT_CONNECTION_FINISHED)
+            except DoubaoSpeechError:
+                raise
+            except Exception:
+                pass
+    except DoubaoSpeechError:
+        raise
+    except Exception as exc:
+        raise DoubaoSpeechError(f"豆包语音合成 WebSocket 请求失败：{exc}") from exc
+
+    audio_bytes = bytes(audio_data)
+    if not audio_bytes and last_payload:
+        try:
+            audio_bytes = _extract_tts_audio_bytes(last_payload)
+        except DoubaoSpeechError:
+            audio_bytes = b""
+    if not audio_bytes:
+        raise DoubaoSpeechError("豆包语音合成返回音频为空。")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(audio_bytes)
+    return {
+        "task_id": session_id,
+        "voice_type": speaker,
+        "encoding": encoding,
+        "text_length": len(clean_text),
+        "path": str(output_path),
+        "resource_id": tts_resource_id,
+    }
 
 
 async def transcribe_media_file(

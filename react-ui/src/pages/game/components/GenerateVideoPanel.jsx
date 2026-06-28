@@ -13,7 +13,7 @@ export function GenerateVideoActions({
     <div style={{ display: 'flex', gap: 8 }}>
       <button onClick={onAddScene} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '7px 13px', borderRadius: 7, fontSize: 12, fontWeight: 500, background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}><Plus size={14} /> 添加场景</button>
       <button onClick={onGenerateAll} disabled={processingCount > 0} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '7px 15px', borderRadius: 7, fontSize: 12, fontWeight: 600, background: processingCount > 0 ? 'var(--bg-tertiary)' : 'var(--accent-gradient)', color: '#fff' }}>
-        {processingCount > 0 ? <><Loader2 size={13} className="spin" /> 生成中 ({processingCount})</> : <><Video size={13} /> 全部生成{estimateTotalCost != null && <span style={{ opacity: 0.8, fontWeight: 400 }}> ≈{estimateTotalCost}元</span>}</>}
+        {processingCount > 0 ? <><Loader2 size={13} className="spin" /> 生成中 ({processingCount})</> : <><Video size={13} /> 全部生成{estimateTotalCost != null && <span style={{ opacity: 0.8, fontWeight: 400 }}> ≈{estimateTotalCost}</span>}</>}
       </button>
       {completedCount > 0 && (
         <button onClick={onDownloadAll} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '7px 13px', borderRadius: 7, fontSize: 12, fontWeight: 600, background: 'rgba(16,185,129,0.1)', color: '#10b981', border: '1px solid rgba(16,185,129,0.2)' }}><FileDown size={14} /> 全部导出 ({completedCount})</button>

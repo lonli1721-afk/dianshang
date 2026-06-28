@@ -64,6 +64,7 @@ export const ASPECT_OPTIONS = ['1:1', '9:16', '16:9', '4:3', '3:4']
 export const DERIVE_MODELS_BY_PROVIDER = {
   jimeng: 'jimeng',
   gemini: 'gemini_image',
+  openai: 'openai_image',
 }
 
 export const REVERSE_MODELS = [

@@ -286,10 +286,15 @@ def prepare_generate_nine_request(req: GenerateNineRequest) -> GenerateNineReque
     theme = (req.theme or "").strip()
     if not theme:
         raise HTTPException(400, "请填写九图生成主题。")
-    provider = req.provider if req.provider in {"jimeng", "gemini_image"} else "jimeng"
+    provider = req.provider if req.provider in {"jimeng", "gemini_image", "openai_image"} else "jimeng"
     model = (req.model or "").strip()
     if not model:
-        model = "gemini-3.1-flash-image-preview" if provider == "gemini_image" else "seedream-4.5"
+        if provider == "gemini_image":
+            model = "gemini-3.1-flash-image-preview"
+        elif provider == "openai_image":
+            model = "gpt-image-2"
+        else:
+            model = "seedream-4.5"
     requested_count = req.batch_size
     if req.count is not None and req.batch_size == 12:
         requested_count = req.count
@@ -329,10 +334,15 @@ def prepare_generate_roles_request(req: GenerateRolesRequest) -> GenerateRolesRe
     roles = [str(item or "").strip() for item in req.roles or [] if str(item or "").strip()]
     if len(roles) != 9 and not (req.single_index and len(roles) == 1):
         raise HTTPException(400, "同风格角色九图需要填写 9 个角色或物品名。")
-    provider = req.provider if req.provider in {"jimeng", "gemini_image"} else "jimeng"
+    provider = req.provider if req.provider in {"jimeng", "gemini_image", "openai_image"} else "jimeng"
     model = (req.model or "").strip()
     if not model:
-        model = "gemini-3.1-flash-image-preview" if provider == "gemini_image" else "seedream-4.5"
+        if provider == "gemini_image":
+            model = "gemini-3.1-flash-image-preview"
+        elif provider == "openai_image":
+            model = "gpt-image-2"
+        else:
+            model = "seedream-4.5"
     style_lock = req.style_lock if req.style_lock in {"strict", "soft", "off"} else "strict"
     variation_policy = req.variation_policy if req.variation_policy in {"subject_only", "creative"} else "subject_only"
     style_lock_options = [
@@ -363,10 +373,15 @@ def prepare_generate_roles_request(req: GenerateRolesRequest) -> GenerateRolesRe
 
 def prepare_derive_request(req: DeriveRequest) -> DeriveRequest:
     mode = req.mode if req.mode in DERIVE_MODE_PROMPTS else "fine_tune"
-    provider = req.provider if req.provider in {"jimeng", "gemini_image"} else "jimeng"
+    provider = req.provider if req.provider in {"jimeng", "gemini_image", "openai_image"} else "jimeng"
     model = (req.model or "").strip()
     if not model:
-        model = "gemini-3.1-flash-image-preview" if provider == "gemini_image" else "seedream-4.5"
+        if provider == "gemini_image":
+            model = "gemini-3.1-flash-image-preview"
+        elif provider == "openai_image":
+            model = "gpt-image-2"
+        else:
+            model = "seedream-4.5"
     max_refs = 4 if mode == "creative_fusion" else 1
     reference_urls = _normalize_urls(req.reference_urls, max_count=max_refs, label="参考图")
     return req.model_copy(update={
@@ -1144,14 +1159,31 @@ def _nine_image_prompt(req: GenerateNineRequest, index: int) -> str:
 
 async def _generate_reference_context(req: GenerateNineRequest) -> dict:
     if not req.style_anchor_url:
-        return {"jimeng_urls": [], "gemini_bytes": []}
-    if req.provider == "gemini_image":
+        return {"jimeng_urls": [], "gemini_bytes": [], "openai_images": []}
+    if req.provider in {"gemini_image", "openai_image"}:
+        data, suffix = await _read_image_bytes(req.style_anchor_url)
+        mime = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+        }.get(suffix, "image/png")
+        if req.provider == "openai_image":
+            return {"jimeng_urls": [], "gemini_bytes": [], "openai_images": [(data, mime)]}
         data = await _read_gemini_reference_bytes(req.style_anchor_url)
-        return {"jimeng_urls": [], "gemini_bytes": [data]}
+        return {"jimeng_urls": [], "gemini_bytes": [data], "openai_images": []}
     return {
         "jimeng_urls": [await deps.resolve_image_for_external(req.style_anchor_url)],
         "gemini_bytes": [],
+        "openai_images": [],
     }
+
+
+async def _save_generated_image_result(result: dict, prefix: str = "image") -> dict:
+    images = result.get("images") or []
+    if any(isinstance(item, dict) and item.get("data") for item in images):
+        return await asyncio.to_thread(deps.save_base64_image_result, result, prefix)
+    return await deps.cache_remote_file_result(result)
 
 
 async def _generate_nine_image(req: GenerateNineRequest, prompt: str, index: int, reference_context: dict | None = None) -> dict:
@@ -1183,7 +1215,35 @@ async def _generate_nine_image(req: GenerateNineRequest, prompt: str, index: int
                 raise
             logger.info("Gemini style anchor failed for image_tools_generate_nine; retrying without reference image.")
             result = await _call_gemini([])
-        cached = await asyncio.to_thread(deps.save_gemini_image_result, result)
+        cached = await _save_generated_image_result(result, "gemini")
+    elif req.provider == "openai_image":
+        svc = _provider_registry.openai()
+        if not svc:
+            raise HTTPException(400, "OpenAI API Key is not configured. Please configure it in Settings.")
+
+        async def _call_openai(reference_images: list[tuple[bytes, str]]):
+            return await run_provider_call(
+                "openai_image",
+                "image_tools_generate_nine",
+                lambda: svc.generate_image(
+                    prompt=prompt,
+                    model=req.model,
+                    width=width,
+                    height=height,
+                    reference_images=reference_images,
+                    quality="2K",
+                ),
+            )
+
+        openai_refs = reference_context.get("openai_images") or []
+        try:
+            result = await _call_openai(openai_refs)
+        except Exception:
+            if not openai_refs:
+                raise
+            logger.info("OpenAI style anchor failed for image_tools_generate_nine; retrying without reference image.")
+            result = await _call_openai([])
+        cached = await _save_generated_image_result(result, "openai")
     else:
         svc = _provider_registry.jimeng()
         if not svc:
@@ -1226,7 +1286,9 @@ async def _generate_nine_image(req: GenerateNineRequest, prompt: str, index: int
 async def generate_nine_images(req: GenerateNineRequest) -> dict:
     if req.provider == "gemini_image" and not _provider_registry.gemini():
         raise HTTPException(400, "Gemini 图片还没有配置 API Key，请先到设置里配置，或切换到即梦 / Seedream。")
-    if req.provider != "gemini_image" and not _provider_registry.jimeng():
+    if req.provider == "openai_image" and not _provider_registry.openai():
+        raise HTTPException(400, "OpenAI API Key is not configured. Please configure it in Settings.")
+    if req.provider not in {"gemini_image", "openai_image"} and not _provider_registry.jimeng():
         raise HTTPException(400, "即梦 / Seedream 还没有配置 API Key，请先到设置里配置，或切换到 Gemini 图片。")
 
     batch_id = f"batch_{uuid.uuid4().hex[:12]}"
@@ -1236,7 +1298,7 @@ async def generate_nine_images(req: GenerateNineRequest) -> dict:
         reference_context = await _generate_reference_context(req)
     except Exception as exc:
         logger.warning("Style anchor preparation failed for generate_nine batch=%s: %s", batch_id, exc)
-        reference_context = {"jimeng_urls": [], "gemini_bytes": []}
+        reference_context = {"jimeng_urls": [], "gemini_bytes": [], "openai_images": []}
 
     semaphore = asyncio.Semaphore(IMAGE_TOOLS_AI_GENERATION_CONCURRENCY)
 
@@ -1311,7 +1373,9 @@ def _role_image_prompt(req: GenerateRolesRequest, role_name: str, index: int) ->
 async def generate_role_images(req: GenerateRolesRequest) -> dict:
     if req.provider == "gemini_image" and not _provider_registry.gemini():
         raise HTTPException(400, "Gemini 图片还没有配置 API Key，请先到设置里配置，或切换到即梦 / Seedream。")
-    if req.provider != "gemini_image" and not _provider_registry.jimeng():
+    if req.provider == "openai_image" and not _provider_registry.openai():
+        raise HTTPException(400, "OpenAI API Key is not configured. Please configure it in Settings.")
+    if req.provider not in {"gemini_image", "openai_image"} and not _provider_registry.jimeng():
         raise HTTPException(400, "即梦 / Seedream 还没有配置 API Key，请先到设置里配置，或切换到 Gemini 图片。")
 
     batch_id = f"roles_{uuid.uuid4().hex[:12]}"
@@ -1319,7 +1383,7 @@ async def generate_role_images(req: GenerateRolesRequest) -> dict:
         reference_context = await _generate_reference_context(req)
     except Exception as exc:
         logger.warning("Style anchor preparation failed for generate_roles batch=%s: %s", batch_id, exc)
-        reference_context = {"jimeng_urls": [], "gemini_bytes": []}
+        reference_context = {"jimeng_urls": [], "gemini_bytes": [], "openai_images": []}
 
     semaphore = asyncio.Semaphore(IMAGE_TOOLS_AI_GENERATION_CONCURRENCY)
 
@@ -1437,11 +1501,43 @@ async def _derive_with_gemini(req: DeriveRequest, prompt: str) -> dict:
     return deps.save_gemini_image_result(result)
 
 
+async def _derive_with_openai(req: DeriveRequest, prompt: str) -> dict:
+    svc = _provider_registry.openai()
+    if not svc:
+        raise HTTPException(400, "OpenAI API Key is not configured. Please configure it in Settings.")
+    ref_images = []
+    for url in req.reference_urls:
+        data, suffix = await _read_image_bytes(url)
+        mime = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+        }.get(suffix, "image/png")
+        ref_images.append((data, mime))
+    width, height = _image_size(req)
+    result = await run_provider_call(
+        "openai_image",
+        "image_tools_derive",
+        lambda: svc.generate_image(
+            prompt=prompt,
+            model=req.model or "gpt-image-2",
+            width=width,
+            height=height,
+            reference_images=ref_images,
+            quality="2K",
+        ),
+    )
+    return await _save_generated_image_result(result, "openai")
+
+
 async def derive_image_batch(req: DeriveRequest) -> dict:
     prompt = _derive_prompt(req)
     try:
         if req.provider == "gemini_image":
             result = await _derive_with_gemini(req, prompt)
+        elif req.provider == "openai_image":
+            result = await _derive_with_openai(req, prompt)
         elif req.provider == "jimeng":
             result = await _derive_with_jimeng(req, prompt)
         else:
