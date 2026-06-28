@@ -131,6 +131,8 @@ DEFAULT_STORYBOARD_SCENE_COUNT = 6
 VEO_STORYBOARD_SCENE_COUNT = 4
 VEO_STORYBOARD_DURATION = 8
 WORKBENCH_DRAFT_SETTING_KEY = "batch_video_workbench_draft_v1"
+PRODUCT_MEMORY_SETTING_KEY = "batch_video_product_memory_v1"
+PRODUCT_MEMORY_LIMIT = 80
 
 
 def _toapis_price_overrides() -> dict[str, float]:
@@ -284,6 +286,11 @@ class WorkbenchDraftRequest(BaseModel):
     draft: dict[str, Any] = Field(default_factory=dict)
 
 
+class ProductMemoryRequest(BaseModel):
+    product_name: str = ""
+    memory: dict[str, Any] = Field(default_factory=dict)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -291,6 +298,55 @@ def _now() -> str:
 def _clean_text(text: str, limit: int = 240) -> str:
     cleaned = re.sub(r"\s+", " ", (text or "").strip())
     return cleaned[:limit]
+
+
+def _product_memory_key(product_name: str) -> str:
+    return re.sub(r"\s+", " ", (product_name or "").strip()).lower()
+
+
+def _load_product_memories() -> dict[str, Any]:
+    raw = db.get_user_setting(PRODUCT_MEMORY_SETTING_KEY, "")
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_product_memories(memories: dict[str, Any]) -> None:
+    items = [
+        (key, value)
+        for key, value in (memories or {}).items()
+        if key and isinstance(value, dict)
+    ]
+    items.sort(key=lambda item: int(item[1].get("updatedAt") or 0), reverse=True)
+    trimmed = dict(items[:PRODUCT_MEMORY_LIMIT])
+    db.set_user_setting(
+        PRODUCT_MEMORY_SETTING_KEY,
+        json.dumps(trimmed, ensure_ascii=False, separators=(",", ":")),
+    )
+
+
+def _normalize_product_memory(raw: dict[str, Any], product_name: str) -> dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+    product = source.get("product") if isinstance(source.get("product"), dict) else {}
+    product = dict(product)
+    product["name"] = _clean_text(product.get("name") or product_name, 100)
+    selling_points = source.get("sellingPoints") or source.get("selling_points") or []
+    if not isinstance(selling_points, list):
+        selling_points = []
+    updated_at = int(source.get("updatedAt") or source.get("updated_at") or datetime.now(timezone.utc).timestamp() * 1000)
+    return {
+        "productName": product["name"],
+        "product": product,
+        "liveVideo": source.get("liveVideo") or source.get("live_video") or None,
+        "transcript": str(source.get("transcript") or "")[:200000],
+        "manualSellingPoints": str(source.get("manualSellingPoints") or source.get("manual_selling_points") or "")[:50000],
+        "sellingPoints": [point for point in selling_points[:80] if isinstance(point, dict)],
+        "updatedAt": updated_at,
+    }
 
 
 def _setting_value(*keys: str) -> str:
@@ -2113,6 +2169,35 @@ async def save_workbench_draft(req: WorkbenchDraftRequest):
         json.dumps(draft, ensure_ascii=False, separators=(",", ":")),
     )
     return {"ok": True, "updatedAt": draft["updatedAt"]}
+
+
+@router.get("/product-memory")
+async def get_product_memory(product_name: str = ""):
+    key = _product_memory_key(product_name)
+    if not key:
+        return {"found": False, "memory": None, "updatedAt": 0}
+    memory = _load_product_memories().get(key)
+    if not isinstance(memory, dict):
+        return {"found": False, "memory": None, "updatedAt": 0}
+    return {
+        "found": True,
+        "memory": memory,
+        "updatedAt": int(memory.get("updatedAt") or 0),
+    }
+
+
+@router.put("/product-memory")
+async def save_product_memory(req: ProductMemoryRequest):
+    product_name = _clean_text(req.product_name or req.memory.get("productName", ""), 100)
+    key = _product_memory_key(product_name)
+    if not key:
+        return {"ok": False, "updatedAt": 0, "message": "Product name is required."}
+    memory = _normalize_product_memory(req.memory or {}, product_name)
+    memory["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+    memories = _load_product_memories()
+    memories[key] = memory
+    _save_product_memories(memories)
+    return {"ok": True, "updatedAt": memory["updatedAt"], "memory": memory}
 
 
 @router.post("/product-reconstruction")

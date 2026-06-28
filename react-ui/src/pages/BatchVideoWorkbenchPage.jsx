@@ -991,6 +991,68 @@ function saveWorkbenchDraft(draft) {
   return nextDraft
 }
 
+function normalizeProductMemoryName(name) {
+  return String(name || '').trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+function buildProductMemorySnapshot({
+  product,
+  liveVideo,
+  transcript,
+  manualSellingPoints,
+  sellingPoints,
+}) {
+  const normalizedProduct = normalizeProductDraft(product)
+  return {
+    productName: normalizedProduct.name,
+    product: normalizedProduct,
+    liveVideo: normalizeMediaItem(liveVideo),
+    transcript: String(transcript || ''),
+    manualSellingPoints: String(manualSellingPoints || ''),
+    sellingPoints: Array.isArray(sellingPoints)
+      ? sellingPoints.map(normalizeSellingPoint).filter(point => point.title || point.description || point.evidence)
+      : [],
+  }
+}
+
+function productMemoryHasContent(memory) {
+  const product = normalizeProductDraft(memory?.product)
+  return Boolean(
+    product.imageUrls.length
+    || product.detailSheetUrl
+    || memory?.liveVideo?.url
+    || String(memory?.transcript || '').trim()
+    || String(memory?.manualSellingPoints || '').trim()
+    || (Array.isArray(memory?.sellingPoints) && memory.sellingPoints.length)
+  )
+}
+
+function productMemorySignature(memory) {
+  return JSON.stringify(memory || {})
+}
+
+function rememberedFieldsSignature({
+  product,
+  liveVideo,
+  transcript,
+  manualSellingPoints,
+  sellingPoints,
+}) {
+  const normalizedProduct = normalizeProductDraft(product)
+  return JSON.stringify({
+    productImages: normalizedProduct.imageUrls.map(item => item.url),
+    detailSheetUrl: normalizedProduct.detailSheetUrl,
+    liveVideoUrl: normalizeMediaItem(liveVideo)?.url || '',
+    transcript: String(transcript || ''),
+    manualSellingPoints: String(manualSellingPoints || ''),
+    sellingPoints: (Array.isArray(sellingPoints) ? sellingPoints : []).map(point => ({
+      title: String(point?.title || ''),
+      description: String(point?.description || ''),
+      evidence: String(point?.evidence || ''),
+    })),
+  })
+}
+
 function StatusNotice({ notice }) {
   if (!notice) return null
   return (
@@ -1080,11 +1142,15 @@ export default function BatchVideoWorkbenchPage() {
   const [productPosterUrl, setProductPosterUrl] = useState(() => initialDraft.productPosterUrl || '')
   const [productPosterPrompt, setProductPosterPrompt] = useState(() => initialDraft.productPosterPrompt || '')
   const [productPosterHistory, setProductPosterHistory] = useState(() => initialDraft.productPosterHistory || [])
+  const [draftHydrated, setDraftHydrated] = useState(false)
+  const [productMemoryStatus, setProductMemoryStatus] = useState({ state: 'idle', text: '' })
+  const [productMemoryReadyTick, setProductMemoryReadyTick] = useState(0)
   const [notice, setNotice] = useState(null)
   const [loadingTasks, setLoadingTasks] = useState({})
   const [, setProgressTick] = useState(0)
 
   const productPayload = useMemo(() => buildProductPayload(product), [product])
+  const productMemoryNameKey = useMemo(() => normalizeProductMemoryName(product.name), [product.name])
   const selectedVideoModel = useMemo(
     () => videoModels.find(item => item.id === videoModel) || DEFAULT_VIDEO_MODELS.find(item => item.id === videoModel),
     [videoModel, videoModels],
@@ -1119,6 +1185,12 @@ export default function BatchVideoWorkbenchPage() {
   const storyboardRegenerateIndexRef = useRef(0)
   const draftHydratedRef = useRef(false)
   const draftSaveTimerRef = useRef(null)
+  const productMemoryFetchRef = useRef({ nameKey: '', requestId: 0 })
+  const productMemorySaveTimerRef = useRef(null)
+  const productMemoryLastSavedRef = useRef('')
+  const productMemoryApplyRef = useRef({ nameKey: '', signature: '' })
+  const productMemoryPreviousNameKeyRef = useRef(productMemoryNameKey)
+  const productMemorySaveBaselineRef = useRef({ nameKey: productMemoryNameKey, signature: '' })
   const hasProcessingVideo = scenes.some(scene => isProcessingTaskStatus(scene.status))
 
   const { registerTaskPolling } = useGameTaskPolling({
@@ -1130,6 +1202,60 @@ export default function BatchVideoWorkbenchPage() {
   const updateProduct = (key, value) => {
     setProduct(prev => ({ ...prev, [key]: value }))
   }
+
+  const applyProductMemory = useCallback((memory, { replace = false } = {}) => {
+    if (!memory || typeof memory !== 'object') return false
+    const memoryProduct = normalizeProductDraft(memory.product)
+    let changed = false
+    setProduct(prev => {
+      const next = { ...prev }
+      if (replace || (!next.category && memoryProduct.category)) {
+        next.category = memoryProduct.category
+        changed = true
+      }
+      if (replace || (!next.description && memoryProduct.description)) {
+        next.description = memoryProduct.description
+        changed = true
+      }
+      if (replace || !Array.isArray(next.imageUrls) || !next.imageUrls.length) {
+        if (memoryProduct.imageUrls.length) {
+          next.imageUrls = memoryProduct.imageUrls
+          changed = true
+        } else if (replace && next.imageUrls?.length) {
+          next.imageUrls = []
+          changed = true
+        }
+      }
+      if (replace || (!next.detailSheetUrl && memoryProduct.detailSheetUrl)) {
+        next.detailSheetUrl = memoryProduct.detailSheetUrl
+        next.detailSheetPrompt = memoryProduct.detailSheetPrompt || ''
+        next.detailSheetHistory = memoryProduct.detailSheetHistory
+        changed = true
+      } else if ((!next.detailSheetHistory || !next.detailSheetHistory.length) && memoryProduct.detailSheetHistory.length) {
+        next.detailSheetHistory = memoryProduct.detailSheetHistory
+        changed = true
+      }
+      return changed ? next : prev
+    })
+    const memoryLiveVideo = normalizeMediaItem(memory.liveVideo)
+    if (replace || (!liveVideo && memoryLiveVideo)) {
+      setLiveVideo(memoryLiveVideo)
+      changed = true
+    }
+    if (replace || (!String(transcript || '').trim() && String(memory.transcript || '').trim())) {
+      setTranscript(String(memory.transcript || ''))
+      changed = true
+    }
+    if (replace || (!String(manualSellingPoints || '').trim() && String(memory.manualSellingPoints || '').trim())) {
+      setManualSellingPoints(String(memory.manualSellingPoints || ''))
+      changed = true
+    }
+    if (replace || (!sellingPoints.length && Array.isArray(memory.sellingPoints) && memory.sellingPoints.length)) {
+      setSellingPoints(Array.isArray(memory.sellingPoints) ? memory.sellingPoints.map(normalizeSellingPoint) : [])
+      changed = true
+    }
+    return changed
+  }, [liveVideo, manualSellingPoints, sellingPoints.length, transcript])
 
   const applyDraftToState = useCallback((draft) => {
     const nextDraft = normalizeDraft(draft)
@@ -1342,6 +1468,7 @@ export default function BatchVideoWorkbenchPage() {
   const handleClearDraft = useCallback(() => {
     const emptyDraft = createDefaultDraft()
     draftHydratedRef.current = true
+    setDraftHydrated(true)
     if (typeof window !== 'undefined') {
       try {
         window.localStorage.removeItem(WORKBENCH_DRAFT_STORAGE_KEY)
@@ -1397,12 +1524,88 @@ export default function BatchVideoWorkbenchPage() {
       .finally(() => {
         if (!cancelled) {
           draftHydratedRef.current = true
+          setDraftHydrated(true)
         }
       })
     return () => {
       cancelled = true
     }
   }, [applyDraftToState, initialDraft.updatedAt])
+
+  useEffect(() => {
+    if (!draftHydrated) return undefined
+    const name = product.name.trim()
+    const nameKey = productMemoryNameKey
+    if (!nameKey) {
+      setProductMemoryStatus({ state: 'idle', text: '' })
+      return undefined
+    }
+    const requestId = (productMemoryFetchRef.current.requestId || 0) + 1
+    productMemoryFetchRef.current = { nameKey, requestId, pending: true }
+    setProductMemoryStatus({ state: 'checking', text: '正在查找这个产品的历史记忆...' })
+    const timer = window.setTimeout(() => {
+      const previousNameKey = productMemoryPreviousNameKeyRef.current
+      const shouldReplaceProductContent = Boolean(previousNameKey && previousNameKey !== nameKey)
+      productMemoryPreviousNameKeyRef.current = nameKey
+      api.get(`/api/batch-video/product-memory?product_name=${encodeURIComponent(name)}`, { timeout: 20_000 })
+        .then(data => {
+          const currentFetch = productMemoryFetchRef.current
+          if (currentFetch.requestId !== requestId || currentFetch.nameKey !== nameKey) return
+          const memory = data?.memory
+          if (data?.found && productMemoryHasContent(memory)) {
+            const memorySnapshot = buildProductMemorySnapshot({
+              product: memory.product,
+              liveVideo: memory.liveVideo,
+              transcript: memory.transcript,
+              manualSellingPoints: memory.manualSellingPoints,
+              sellingPoints: memory.sellingPoints,
+            })
+            const signature = productMemorySignature(memorySnapshot)
+            if (productMemoryApplyRef.current.nameKey !== nameKey || productMemoryApplyRef.current.signature !== signature) {
+              applyProductMemory(memory, { replace: shouldReplaceProductContent })
+              productMemoryApplyRef.current = { nameKey, signature }
+            }
+            productMemoryLastSavedRef.current = signature
+            productMemorySaveBaselineRef.current = { nameKey, signature }
+            setProductMemoryStatus({ state: 'loaded', text: '已载入这个产品之前保存的还原图、转写和卖点。' })
+            return
+          }
+          productMemoryLastSavedRef.current = ''
+          productMemorySaveBaselineRef.current = { nameKey, signature: '' }
+          productMemoryApplyRef.current = { nameKey, signature: '' }
+          if (shouldReplaceProductContent) {
+            setProduct(prev => ({
+              ...prev,
+              category: '',
+              description: '',
+              imageUrls: [],
+              detailSheetUrl: '',
+              detailSheetPrompt: '',
+              detailSheetHistory: [],
+            }))
+            setLiveVideo(null)
+            setTranscript('')
+            setManualSellingPoints('')
+            setSellingPoints([])
+          }
+          setProductMemoryStatus({ state: 'empty', text: '这个产品还没有历史记忆；重新上传或生成后会自动保存。' })
+        })
+        .catch(() => {
+          const currentFetch = productMemoryFetchRef.current
+          if (currentFetch.requestId === requestId && currentFetch.nameKey === nameKey) {
+            setProductMemoryStatus({ state: 'error', text: '产品记忆读取失败，本次仍可继续生成。' })
+          }
+        })
+        .finally(() => {
+          const currentFetch = productMemoryFetchRef.current
+        if (currentFetch.requestId === requestId && currentFetch.nameKey === nameKey) {
+          productMemoryFetchRef.current = { ...currentFetch, pending: false }
+          setProductMemoryReadyTick(tick => tick + 1)
+        }
+      })
+    }, 550)
+    return () => window.clearTimeout(timer)
+  }, [applyProductMemory, draftHydrated, product.name, productMemoryNameKey])
 
   useEffect(() => {
     const wasVeoStoryboardMode = previousVeoStoryboardModeRef.current
@@ -1531,6 +1734,67 @@ export default function BatchVideoWorkbenchPage() {
     variantCount,
     videoModel,
     videoResolution,
+  ])
+
+  useEffect(() => {
+    if (!draftHydratedRef.current || !productMemoryNameKey) return undefined
+    const currentFetch = productMemoryFetchRef.current
+    if (currentFetch?.nameKey === productMemoryNameKey && currentFetch?.pending) return undefined
+    const memory = buildProductMemorySnapshot({
+      product,
+      liveVideo,
+      transcript,
+      manualSellingPoints,
+      sellingPoints,
+    })
+    if (!productMemoryHasContent(memory)) return undefined
+    const signature = productMemorySignature(memory)
+    if (signature === productMemoryLastSavedRef.current) return undefined
+    if (
+      productMemorySaveBaselineRef.current.nameKey === productMemoryNameKey
+      && productMemorySaveBaselineRef.current.signature === signature
+    ) {
+      productMemoryLastSavedRef.current = signature
+      return undefined
+    }
+    if (productMemorySaveTimerRef.current) {
+      window.clearTimeout(productMemorySaveTimerRef.current)
+    }
+    setProductMemoryStatus({ state: 'saving', text: '正在保存这个产品的记忆...' })
+    productMemorySaveTimerRef.current = window.setTimeout(() => {
+      api.put('/api/batch-video/product-memory', {
+        product_name: product.name,
+        memory,
+      }, { timeout: 20_000 })
+        .then(result => {
+          if (normalizeProductMemoryName(product.name) !== productMemoryNameKey) return
+          productMemoryLastSavedRef.current = signature
+          productMemorySaveBaselineRef.current = { nameKey: productMemoryNameKey, signature }
+          setProductMemoryStatus({
+            state: 'saved',
+            text: result?.updatedAt ? '这个产品的还原图、转写和卖点已保存。' : '产品记忆已保存。',
+          })
+        })
+        .catch(() => {
+          if (normalizeProductMemoryName(product.name) === productMemoryNameKey) {
+            setProductMemoryStatus({ state: 'error', text: '产品记忆保存失败，本次草稿仍已保存。' })
+          }
+        })
+    }, 1000)
+    return () => {
+      if (productMemorySaveTimerRef.current) {
+        window.clearTimeout(productMemorySaveTimerRef.current)
+        productMemorySaveTimerRef.current = null
+      }
+    }
+  }, [
+    liveVideo,
+    manualSellingPoints,
+    product,
+    productMemoryNameKey,
+    productMemoryReadyTick,
+    sellingPoints,
+    transcript,
   ])
 
   async function uploadFiles(files, acceptPrefix) {
@@ -2449,6 +2713,12 @@ export default function BatchVideoWorkbenchPage() {
               />
             </label>
           </div>
+          {product.name.trim() && productMemoryStatus.text && (
+            <div className={`batch-video-product-memory ${productMemoryStatus.state || 'idle'}`}>
+              <RefreshCw size={13} className={productMemoryStatus.state === 'checking' || productMemoryStatus.state === 'saving' ? 'spin' : ''} />
+              <span>{productMemoryStatus.text}</span>
+            </div>
+          )}
           <label className="batch-video-field">
             <span>产品说明</span>
             <textarea
