@@ -50,6 +50,14 @@ const DEFAULT_VIDEO_MODELS = FALLBACK_VIDEO_MODELS
 
 const ASPECT_OPTIONS = ['9:16', '16:9', '1:1', '4:3', '3:4']
 const DURATION_OPTIONS = [4, 5, 6, 8, 10, 12, 15]
+const CLIP_PLAYBACK_RATE_OPTIONS = [
+  { value: 0.5, label: '0.5x 慢放' },
+  { value: 0.75, label: '0.75x' },
+  { value: 1, label: '1x 正常' },
+  { value: 1.25, label: '1.25x' },
+  { value: 1.5, label: '1.5x' },
+  { value: 2, label: '2x 快放' },
+]
 const DEFAULT_STORYBOARD_SCENE_COUNT = 6
 const VEO_STORYBOARD_SCENE_COUNT = 4
 const VEO_STORYBOARD_DURATION = 8
@@ -488,6 +496,12 @@ function normalizeClipTime(value) {
   return Math.max(0, Number(number.toFixed(2)))
 }
 
+function normalizeClipPlaybackRate(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number) || number <= 0) return 1
+  return Number(Math.max(0.25, Math.min(4, number)).toFixed(2))
+}
+
 function formatClipTime(value) {
   const number = Number(value)
   if (!Number.isFinite(number) || number < 0) return '0.0s'
@@ -528,6 +542,7 @@ function createFinalClipFromScene(scene, index = 0, version = null) {
     sourceLabel: selectedVersion.label || selectedVersion.source || '',
     startTime: 0,
     endTime: '',
+    playbackRate: 1,
     voiceoverText,
     subtitle: voiceoverText,
   }
@@ -547,6 +562,7 @@ function normalizeFinalClip(clip, index = 0, scenes = []) {
     : (String(scene.voiceover_text || '').trim() || buildDefaultVoiceover(scene, index))
   const startTime = normalizeClipTime(clip.startTime ?? clip.start_time)
   const endTime = normalizeClipTime(clip.endTime ?? clip.end_time)
+  const playbackRate = normalizeClipPlaybackRate(clip.playbackRate ?? clip.playback_rate)
   return {
     id: String(clip.id || `clip_${Date.now()}_${index}`),
     sceneId: sceneId || scene.id || '',
@@ -555,6 +571,7 @@ function normalizeFinalClip(clip, index = 0, scenes = []) {
     sourceLabel: String(clip.sourceLabel || clip.source_label || ''),
     startTime,
     endTime: endTime !== '' && startTime !== '' && endTime <= startTime ? '' : endTime,
+    playbackRate,
     voiceoverText,
     subtitle: hasVoiceoverValue ? voiceoverText : String(clip.subtitle || voiceoverText),
   }
@@ -1513,6 +1530,7 @@ export default function BatchVideoWorkbenchPage() {
     if (!video) return
     const startTime = normalizeClipTime(clip.startTime)
     const endTime = normalizeClipTime(clip.endTime)
+    video.playbackRate = normalizeClipPlaybackRate(clip.playbackRate)
     if (video._batchClipStopAtEnd) {
       video.removeEventListener('timeupdate', video._batchClipStopAtEnd)
       video._batchClipStopAtEnd = null
@@ -2800,6 +2818,7 @@ export default function BatchVideoWorkbenchPage() {
           video_url: clip.videoUrl,
           start_time: clip.startTime === '' ? 0 : Number(clip.startTime || 0),
           end_time: clip.endTime === '' ? null : Number(clip.endTime),
+          playback_rate: normalizeClipPlaybackRate(clip.playbackRate),
           subtitle: voiceoverText,
           voiceover_text: voiceoverText,
         }
@@ -3713,6 +3732,7 @@ export default function BatchVideoWorkbenchPage() {
               const currentPreviewTime = Math.min(Number(previewState.currentTime || 0), sliderMax)
               const clipStartValue = clip.startTime === '' ? 0 : Number(clip.startTime || 0)
               const clipEndValue = clip.endTime === '' ? sliderMax : Number(clip.endTime || 0)
+              const clipPlaybackRate = normalizeClipPlaybackRate(clip.playbackRate)
               return (
                 <div className="batch-video-clip-row" key={clip.id}>
                   <div className="batch-video-clip-head">
@@ -3746,6 +3766,10 @@ export default function BatchVideoWorkbenchPage() {
                               duration: Number.isFinite(nextDuration) ? nextDuration : 0,
                               currentTime: Number(event.currentTarget.currentTime || 0),
                             })
+                            event.currentTarget.playbackRate = clipPlaybackRate
+                          }}
+                          onPlay={event => {
+                            event.currentTarget.playbackRate = clipPlaybackRate
                           }}
                           onTimeUpdate={event => updateClipPreviewState(clip.id, {
                             currentTime: Number(event.currentTarget.currentTime || 0),
@@ -3784,6 +3808,22 @@ export default function BatchVideoWorkbenchPage() {
                           )) : (
                             <option value="">暂无视频版本</option>
                           )}
+                        </select>
+                      </label>
+                      <label className="batch-video-field">
+                        <span>画面倍速</span>
+                        <select
+                          value={clipPlaybackRate}
+                          onChange={event => {
+                            const nextRate = normalizeClipPlaybackRate(event.target.value)
+                            updateFinalClip(clip.id, { playbackRate: nextRate })
+                            const video = typeof document === 'undefined' ? null : document.getElementById(clipVideoElementId(clip.id))
+                            if (video) video.playbackRate = nextRate
+                          }}
+                        >
+                          {CLIP_PLAYBACK_RATE_OPTIONS.map(option => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                          ))}
                         </select>
                       </label>
                       {clip.videoUrl && (

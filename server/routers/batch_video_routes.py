@@ -276,6 +276,7 @@ class FinalVideoSegment(BaseModel):
     voiceover_text: str = ""
     start_time: float | None = None
     end_time: float | None = None
+    playback_rate: float = 1.0
 
 
 class ComposeFinalVideoRequest(BaseModel):
@@ -1774,11 +1775,14 @@ def _prepare_video_segment_sync(
     subtitle_enabled: bool,
     start_time: float | None = None,
     end_time: float | None = None,
+    playback_rate: float = 1.0,
 ) -> None:
     start = max(0.0, float(start_time or 0.0))
     end = max(0.0, float(end_time or 0.0)) if end_time is not None else 0.0
     duration = end - start if end > start else 0.0
+    safe_rate = _safe_playback_rate(playback_rate)
     video_filter = (
+        f"setpts=PTS/{safe_rate:.4f},"
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
         "setsar=1,fps=30"
@@ -1802,12 +1806,12 @@ def _prepare_video_segment_sync(
     ]
     if start > 0:
         cmd.extend(["-ss", f"{start:.3f}"])
+    if duration > 0:
+        cmd.extend(["-t", f"{duration:.3f}"])
     cmd.extend([
         "-i",
         str(input_path),
     ])
-    if duration > 0:
-        cmd.extend(["-t", f"{duration:.3f}"])
     cmd.extend([
         "-vf",
         video_filter,
@@ -2007,13 +2011,40 @@ def _safe_volume(value: float | None, fallback: float) -> float:
     return max(0.0, min(3.0, volume))
 
 
+def _safe_playback_rate(value: float | None) -> float:
+    try:
+        rate = float(value or 1.0)
+    except (TypeError, ValueError):
+        rate = 1.0
+    if not math.isfinite(rate) or rate <= 0:
+        return 1.0
+    return max(0.25, min(4.0, rate))
+
+
 def _segment_clip_duration(item: FinalVideoSegment) -> float:
     try:
         start = max(0.0, float(item.start_time or 0.0))
         end = max(0.0, float(item.end_time or 0.0)) if item.end_time is not None else 0.0
     except (TypeError, ValueError):
         return 0.0
-    return end - start if end > start else 0.0
+    raw_duration = end - start if end > start else 0.0
+    return raw_duration / _safe_playback_rate(item.playback_rate) if raw_duration > 0 else 0.0
+
+
+def _segment_duration_from_source(item: FinalVideoSegment, source_duration: float | None) -> float:
+    try:
+        start = max(0.0, float(item.start_time or 0.0))
+        end = max(0.0, float(item.end_time or 0.0)) if item.end_time is not None else 0.0
+        total = max(0.0, float(source_duration or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+    if end > start:
+        raw_duration = end - start
+    elif total > start:
+        raw_duration = total - start
+    else:
+        raw_duration = total
+    return raw_duration / _safe_playback_rate(item.playback_rate) if raw_duration > 0 else 0.0
 
 
 def _poster_duration_for_voiceover(audio_duration: float | None, fallback: float) -> float:
@@ -2085,6 +2116,19 @@ def _silent_audio_sync(ffmpeg: str, output_path: Path, duration: float) -> None:
     _run_ffmpeg(cmd)
 
 
+def _atempo_filter_chain(rate: float) -> str:
+    remaining = _safe_playback_rate(rate)
+    filters: list[str] = []
+    while remaining > 2.0:
+        filters.append("atempo=2.0")
+        remaining /= 2.0
+    while remaining < 0.5:
+        filters.append("atempo=0.5")
+        remaining /= 0.5
+    filters.append(f"atempo={remaining:.6f}")
+    return ",".join(filters)
+
+
 def _extract_segment_audio_sync(
     ffmpeg: str,
     input_path: Path,
@@ -2093,17 +2137,21 @@ def _extract_segment_audio_sync(
     start_time: float | None,
     end_time: float | None,
     duration: float,
+    playback_rate: float = 1.0,
 ) -> None:
     safe_duration = max(0.1, float(duration or 0.1))
     start = max(0.0, float(start_time or 0.0))
     cmd = [ffmpeg, "-y"]
     if start > 0:
         cmd.extend(["-ss", f"{start:.3f}"])
+    raw_duration = safe_duration * _safe_playback_rate(playback_rate)
+    if raw_duration > 0:
+        cmd.extend(["-t", f"{raw_duration:.3f}"])
     cmd.extend(["-i", str(input_path), "-t", f"{safe_duration:.3f}"])
     cmd.extend([
         "-vn",
         "-af",
-        "apad",
+        f"{_atempo_filter_chain(playback_rate)},apad",
         "-t",
         f"{safe_duration:.3f}",
         "-c:a",
@@ -2778,6 +2826,7 @@ async def compose_final_video(req: ComposeFinalVideoRequest):
                     subtitle_enabled=req.subtitle_enabled,
                     start_time=item.start_time,
                     end_time=item.end_time,
+                    playback_rate=item.playback_rate,
                 )
                 prepared_paths.append(prepared)
                 voiceover_text = (item.voiceover_text or item.subtitle or "").strip()
@@ -2796,11 +2845,12 @@ async def compose_final_video(req: ComposeFinalVideoRequest):
                     try:
                         clip_start = max(0.0, float(item.start_time or 0.0))
                         clip_end = max(0.0, float(item.end_time or 0.0)) if item.end_time is not None else 0.0
-                        segment_duration = clip_end - clip_start if clip_end > clip_start else 0.0
+                        segment_duration = (clip_end - clip_start) / _safe_playback_rate(item.playback_rate) if clip_end > clip_start else 0.0
                     except (TypeError, ValueError):
                         segment_duration = 0.0
                     if segment_duration <= 0:
-                        segment_duration = await asyncio.to_thread(deps.get_local_video_duration_seconds, item.video_url)
+                        source_duration = await asyncio.to_thread(deps.get_local_video_duration_seconds, item.video_url)
+                        segment_duration = _segment_duration_from_source(item, source_duration)
                     await asyncio.to_thread(_fit_audio_to_duration_sync, ffmpeg, audio_path, fitted_audio_path, segment_duration)
                     audio_paths.append(fitted_audio_path)
                     voiceover_audio_count += 1
@@ -2840,7 +2890,8 @@ async def compose_final_video(req: ComposeFinalVideoRequest):
 
                 segment_duration = _segment_clip_duration(item)
                 if segment_duration <= 0:
-                    segment_duration = await asyncio.to_thread(deps.get_local_video_duration_seconds, item.video_url) or 0.0
+                    source_duration = await asyncio.to_thread(deps.get_local_video_duration_seconds, item.video_url) or 0.0
+                    segment_duration = _segment_duration_from_source(item, source_duration)
                 segment_durations.append(segment_duration)
 
                 await asyncio.to_thread(
@@ -2854,6 +2905,7 @@ async def compose_final_video(req: ComposeFinalVideoRequest):
                     subtitle_enabled=req.subtitle_enabled,
                     start_time=item.start_time,
                     end_time=item.end_time,
+                    playback_rate=item.playback_rate,
                 )
                 prepared_paths.append(prepared)
                 main_prepared_paths.append(prepared)
@@ -2868,6 +2920,7 @@ async def compose_final_video(req: ComposeFinalVideoRequest):
                         start_time=item.start_time,
                         end_time=item.end_time,
                         duration=segment_duration,
+                        playback_rate=item.playback_rate,
                     )
                     original_audio_paths.append(original_audio_path)
 
