@@ -7144,6 +7144,18 @@ input::placeholder, textarea::placeholder {
   background: var(--bg-secondary);
 }
 
+.batch-video-rhythm-toolbar {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr);
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
 .batch-video-audio-toggle {
   display: inline-flex;
   align-items: center;
@@ -7490,6 +7502,7 @@ input::placeholder, textarea::placeholder {
   .batch-video-matrix-grid,
   .batch-video-tts-toolbar,
   .batch-video-bgm-toolbar,
+  .batch-video-rhythm-toolbar,
   .batch-video-bgm-current,
   .batch-video-poster-body,
   .batch-video-clip-body,

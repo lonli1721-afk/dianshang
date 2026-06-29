@@ -290,6 +290,7 @@ class ComposeFinalVideoRequest(BaseModel):
     bgm_url: str = ""
     original_audio_volume: float = 0.78
     voiceover_volume: float = 1.35
+    rhythm_match_enabled: bool = False
     bgm_volume: float = 0.45
     poster_image_url: str = ""
     poster_duration: float = 2.0
@@ -2092,6 +2093,139 @@ def _voiceover_for_final_segment(text: str, product_name: str, *, product_name_o
     return cleaned
 
 
+def _voiceover_character_count(text: str) -> int:
+    return len(re.sub(r"\s+", "", text or ""))
+
+
+def _voiceover_duration_estimate(text: str, speed_ratio: float | None) -> float:
+    count = _voiceover_character_count(text)
+    if count <= 0:
+        return 0.0
+    try:
+        speed = float(speed_ratio or 1.0)
+    except (TypeError, ValueError):
+        speed = 1.0
+    if not math.isfinite(speed) or speed <= 0:
+        speed = 1.0
+    chars_per_second = 4.6 * max(0.6, min(1.4, speed))
+    return max(0.8, count / chars_per_second + 0.25)
+
+
+def _voiceover_char_budget(duration: float, speed_ratio: float | None) -> int:
+    try:
+        target = float(duration or 0.0)
+    except (TypeError, ValueError):
+        target = 0.0
+    try:
+        speed = float(speed_ratio or 1.0)
+    except (TypeError, ValueError):
+        speed = 1.0
+    if not math.isfinite(speed) or speed <= 0:
+        speed = 1.0
+    return max(6, min(120, int(max(0.6, target - 0.2) * 4.6 * max(0.6, min(1.4, speed)))))
+
+
+def _shorten_voiceover_locally(text: str, max_chars: int) -> str:
+    cleaned = _clean_text(text, 180)
+    if not cleaned or _voiceover_character_count(cleaned) <= max_chars:
+        return cleaned
+    parts = [part.strip(" ，,。；;、") for part in re.split(r"[，,。；;、\n]+", cleaned) if part.strip()]
+    selected: list[str] = []
+    current = 0
+    for part in parts:
+        part_count = _voiceover_character_count(part)
+        if selected and current + part_count > max_chars:
+            break
+        if not selected and part_count > max_chars:
+            selected.append(part[:max_chars])
+            current = max_chars
+            break
+        selected.append(part)
+        current += part_count
+        if current >= max_chars:
+            break
+    value = "，".join(selected).strip(" ，,。；;、") or cleaned[:max_chars]
+    return f"{value}。"
+
+
+def _extract_voiceover_from_model_response(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw, flags=re.IGNORECASE)
+    candidates = [fenced.group(1).strip()] if fenced else []
+    json_match = re.search(r"\{[\s\S]*\}", raw)
+    if json_match:
+        candidates.append(json_match.group(0))
+    candidates.append(raw)
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            value = data.get("voiceover") or data.get("text") or data.get("旁白")
+            if value:
+                return _clean_text(str(value), 180)
+    cleaned = re.sub(r"^旁白[:：]\s*", "", raw)
+    return _clean_text(cleaned, 180)
+
+
+async def _rewrite_voiceover_for_duration(
+    text: str,
+    *,
+    target_duration: float,
+    product_name: str,
+    speed_ratio: float | None,
+) -> str:
+    max_chars = _voiceover_char_budget(target_duration, speed_ratio)
+    local = _shorten_voiceover_locally(text, max_chars)
+    if _voiceover_duration_estimate(text, speed_ratio) <= target_duration + 0.25:
+        return _clean_text(text, 180)
+    prompt = f"""
+你是电商广告片旁白剪辑师。请把下面旁白精简到约 {target_duration:.1f} 秒内，适合快节奏产品广告。
+
+产品名称：{product_name or "未命名产品"}
+最大字数：{max_chars} 个中文字符左右
+原旁白：{text}
+
+要求：
+1. 只保留核心卖点和画面情绪，不要新增事实。
+2. 语气像广告大片旁白，短、利落、有节奏。
+3. 不要字幕说明，不要主播口播腔。
+4. 只返回 JSON：{{"voiceover":"精简后的旁白"}}
+"""
+    try:
+        raw = await _ark_chat_completion(prompt, model=ARK_MODEL_ID, max_tokens=180)
+        candidate = _extract_voiceover_from_model_response(raw)
+        if candidate:
+            return _shorten_voiceover_locally(candidate, max_chars + 4)
+    except Exception:
+        pass
+    return local
+
+
+def _effective_clip_bounds_for_duration(
+    item: FinalVideoSegment,
+    source_duration: float,
+    target_duration: float,
+) -> tuple[float | None, float | None, float]:
+    try:
+        start = max(0.0, float(item.start_time or 0.0))
+        source_total = max(0.0, float(source_duration or 0.0))
+        requested_end = max(0.0, float(item.end_time or 0.0)) if item.end_time is not None else source_total
+    except (TypeError, ValueError):
+        return item.start_time, item.end_time, 0.0
+    if requested_end <= start:
+        requested_end = source_total if source_total > start else start
+    safe_rate = _safe_playback_rate(item.playback_rate)
+    raw_target_duration = max(0.4, float(target_duration or 0.0) * safe_rate)
+    next_end = min(requested_end, start + raw_target_duration)
+    if next_end <= start:
+        return item.start_time, item.end_time, 0.0
+    return start, next_end, (next_end - start) / safe_rate
+
+
 def _silent_audio_sync(ffmpeg: str, output_path: Path, duration: float) -> None:
     safe_duration = max(0.1, float(duration or 0.1))
     cmd = [
@@ -2796,6 +2930,7 @@ async def compose_final_video(req: ComposeFinalVideoRequest):
     voiceover_error = ""
     voiceover_audio_count = 0
     poster_duration_used = poster_duration if poster_image_path else 0.0
+    rhythm_adjustments: list[dict[str, Any]] = []
 
     if should_voiceover and not voiceover_api_key:
         return {
@@ -2888,10 +3023,57 @@ async def compose_final_video(req: ComposeFinalVideoRequest):
                 if req.voiceover_enabled and voiceover_text and subtitle == raw_voiceover_text:
                     subtitle = voiceover_text
 
+                source_duration = await asyncio.to_thread(deps.get_local_video_duration_seconds, item.video_url) or 0.0
+                effective_start_time = item.start_time
+                effective_end_time = item.end_time
                 segment_duration = _segment_clip_duration(item)
                 if segment_duration <= 0:
-                    source_duration = await asyncio.to_thread(deps.get_local_video_duration_seconds, item.video_url) or 0.0
                     segment_duration = _segment_duration_from_source(item, source_duration)
+
+                if req.rhythm_match_enabled and segment_duration > 0 and voiceover_text:
+                    original_voiceover_text = voiceover_text
+                    voiceover_estimate = _voiceover_duration_estimate(voiceover_text, req.tts_speed_ratio)
+                    if should_voiceover and voiceover_estimate > segment_duration + 0.35:
+                        next_voiceover_text = await _rewrite_voiceover_for_duration(
+                            voiceover_text,
+                            target_duration=max(0.7, segment_duration - 0.15),
+                            product_name=product_name,
+                            speed_ratio=req.tts_speed_ratio,
+                        )
+                        if next_voiceover_text and next_voiceover_text != voiceover_text:
+                            next_estimate = _voiceover_duration_estimate(next_voiceover_text, req.tts_speed_ratio)
+                            rhythm_adjustments.append({
+                                "scene_id": item.scene_id,
+                                "title": item.title,
+                                "action": "voiceover_shortened",
+                                "from_duration": round(voiceover_estimate, 2),
+                                "to_duration": round(next_estimate, 2),
+                            })
+                            voiceover_text = next_voiceover_text
+                            voiceover_estimate = next_estimate
+
+                    if voiceover_estimate > 0:
+                        target_visual_duration = max(1.0, min(segment_duration, voiceover_estimate + 0.45))
+                        if segment_duration > target_visual_duration * 1.18:
+                            next_start, next_end, next_duration = _effective_clip_bounds_for_duration(
+                                item,
+                                source_duration,
+                                target_visual_duration,
+                            )
+                            if next_duration > 0 and next_duration < segment_duration - 0.15:
+                                rhythm_adjustments.append({
+                                    "scene_id": item.scene_id,
+                                    "title": item.title,
+                                    "action": "visual_trimmed",
+                                    "from_duration": round(segment_duration, 2),
+                                    "to_duration": round(next_duration, 2),
+                                })
+                                effective_start_time = next_start
+                                effective_end_time = next_end
+                                segment_duration = next_duration
+
+                    if subtitle == raw_voiceover_text or subtitle == original_voiceover_text:
+                        subtitle = voiceover_text
                 segment_durations.append(segment_duration)
 
                 await asyncio.to_thread(
@@ -2903,8 +3085,8 @@ async def compose_final_video(req: ComposeFinalVideoRequest):
                     height=height,
                     subtitle=subtitle,
                     subtitle_enabled=req.subtitle_enabled,
-                    start_time=item.start_time,
-                    end_time=item.end_time,
+                    start_time=effective_start_time,
+                    end_time=effective_end_time,
                     playback_rate=item.playback_rate,
                 )
                 prepared_paths.append(prepared)
@@ -2917,8 +3099,8 @@ async def compose_final_video(req: ComposeFinalVideoRequest):
                         ffmpeg,
                         input_path,
                         original_audio_path,
-                        start_time=item.start_time,
-                        end_time=item.end_time,
+                        start_time=effective_start_time,
+                        end_time=effective_end_time,
                         duration=segment_duration,
                         playback_rate=item.playback_rate,
                     )
@@ -3085,6 +3267,8 @@ async def compose_final_video(req: ComposeFinalVideoRequest):
         "voiceover_generated": voiceover_generated,
         "voiceover_provider": req.tts_provider,
         "voiceover_error": voiceover_error,
+        "rhythm_match_enabled": req.rhythm_match_enabled,
+        "rhythm_adjustments": rhythm_adjustments,
         "poster_appended": bool(poster_image_path),
         "poster_duration": poster_duration_used if poster_image_path else 0,
         "message": (

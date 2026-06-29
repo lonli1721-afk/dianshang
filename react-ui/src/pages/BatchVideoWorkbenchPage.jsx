@@ -278,6 +278,7 @@ function createDefaultDraft() {
     ttsCustomVoiceType: '',
     ttsSpeedRatio: 1,
     voiceoverVolume: DEFAULT_VOICEOVER_VOLUME,
+    rhythmMatchEnabled: true,
     bgmEnabled: true,
     bgmUrl: '',
     bgmName: '',
@@ -312,6 +313,7 @@ function buildWorkbenchDraftSnapshot({
   ttsCustomVoiceType,
   ttsSpeedRatio,
   voiceoverVolume,
+  rhythmMatchEnabled,
   bgmEnabled,
   bgmUrl,
   bgmName,
@@ -344,6 +346,7 @@ function buildWorkbenchDraftSnapshot({
     ttsCustomVoiceType,
     ttsSpeedRatio,
     voiceoverVolume,
+    rhythmMatchEnabled,
     bgmEnabled,
     bgmUrl,
     bgmName,
@@ -1024,6 +1027,7 @@ function normalizeDraft(rawDraft) {
       : (ttsVoiceType === 'custom' ? rawTtsVoiceType : ''),
     ttsSpeedRatio: Number.isFinite(ttsSpeedRatio) ? Math.max(0.6, Math.min(1.4, ttsSpeedRatio)) : fallback.ttsSpeedRatio,
     voiceoverVolume: Number.isFinite(voiceoverVolume) ? Math.max(0.2, Math.min(2, voiceoverVolume)) : fallback.voiceoverVolume,
+    rhythmMatchEnabled: typeof rawDraft.rhythmMatchEnabled === 'boolean' ? rawDraft.rhythmMatchEnabled : fallback.rhythmMatchEnabled,
     bgmEnabled: typeof rawDraft.bgmEnabled === 'boolean' ? rawDraft.bgmEnabled : fallback.bgmEnabled,
     bgmUrl,
     bgmName: typeof rawDraft.bgmName === 'string' ? rawDraft.bgmName : '',
@@ -1246,6 +1250,7 @@ export default function BatchVideoWorkbenchPage() {
   const [ttsCustomVoiceType, setTtsCustomVoiceType] = useState(() => initialDraft.ttsCustomVoiceType || '')
   const [ttsSpeedRatio, setTtsSpeedRatio] = useState(() => initialDraft.ttsSpeedRatio || 1)
   const [voiceoverVolume, setVoiceoverVolume] = useState(() => initialDraft.voiceoverVolume ?? DEFAULT_VOICEOVER_VOLUME)
+  const [rhythmMatchEnabled, setRhythmMatchEnabled] = useState(() => initialDraft.rhythmMatchEnabled !== false)
   const [bgmEnabled, setBgmEnabled] = useState(() => initialDraft.bgmEnabled !== false)
   const [bgmUrl, setBgmUrl] = useState(() => initialDraft.bgmUrl || '')
   const [bgmName, setBgmName] = useState(() => initialDraft.bgmName || '')
@@ -1393,6 +1398,7 @@ export default function BatchVideoWorkbenchPage() {
     setTtsCustomVoiceType(nextDraft.ttsCustomVoiceType)
     setTtsSpeedRatio(nextDraft.ttsSpeedRatio)
     setVoiceoverVolume(nextDraft.voiceoverVolume)
+    setRhythmMatchEnabled(nextDraft.rhythmMatchEnabled)
     setBgmEnabled(nextDraft.bgmEnabled)
     setBgmUrl(nextDraft.bgmUrl)
     setBgmName(nextDraft.bgmName)
@@ -1898,6 +1904,7 @@ export default function BatchVideoWorkbenchPage() {
       ttsCustomVoiceType,
       ttsSpeedRatio,
       voiceoverVolume,
+      rhythmMatchEnabled,
       bgmEnabled,
       bgmUrl,
       bgmName,
@@ -1938,6 +1945,7 @@ export default function BatchVideoWorkbenchPage() {
     productPosterPrompt,
     productPosterUrl,
     productionMatrix,
+    rhythmMatchEnabled,
     scenes,
     sellingPoints,
     storyboardCreativeBrief,
@@ -2866,6 +2874,7 @@ export default function BatchVideoWorkbenchPage() {
         bgm_url: bgmEnabled ? bgmUrl : '',
         original_audio_volume: 0.78,
         voiceover_volume: selectedVoiceoverVolume,
+        rhythm_match_enabled: rhythmMatchEnabled,
         bgm_volume: selectedBgmVolume,
         poster_image_url: productPosterUrl || '',
         poster_duration: 0,
@@ -3627,6 +3636,19 @@ export default function BatchVideoWorkbenchPage() {
               onChange={event => setVoiceoverVolume(event.target.value)}
             />
           </label>
+        </div>
+        <div className="batch-video-rhythm-toolbar">
+          <label className="batch-video-audio-toggle">
+            <input
+              type="checkbox"
+              checked={rhythmMatchEnabled}
+              onChange={event => setRhythmMatchEnabled(event.target.checked)}
+            />
+            <span>自动匹配画面/旁白节奏</span>
+          </label>
+          <span className="batch-video-audio-hint">
+            先由你逐段筛选可用画面；合成时画面偏长会收短尾部，旁白偏长会自动精简，避免成片节奏拖慢。
+          </span>
         </div>
         <div className="batch-video-bgm-toolbar">
           <label className="batch-video-audio-toggle">
