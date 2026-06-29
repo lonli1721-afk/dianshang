@@ -3821,13 +3821,23 @@ export default function BatchVideoWorkbenchPage() {
                       <div className="batch-video-clip-time-grid">
                         <label className="batch-video-field">
                           <span>开始秒</span>
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.1"
-                            value={clip.startTime}
-                            onChange={event => updateFinalClip(clip.id, { startTime: event.target.value })}
-                          />
+                          <div className="batch-video-clip-time-input-row">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.1"
+                              value={clip.startTime}
+                              onChange={event => updateFinalClip(clip.id, { startTime: event.target.value })}
+                            />
+                            <button
+                              type="button"
+                              className="batch-video-button ghost"
+                              onClick={() => setClipBoundaryFromPreview(clip.id, 'start')}
+                              disabled={!clip.videoUrl}
+                            >
+                              取当前为开始
+                            </button>
+                          </div>
                           <input
                             className="batch-video-clip-field-range"
                             type="range"
@@ -3840,14 +3850,24 @@ export default function BatchVideoWorkbenchPage() {
                         </label>
                         <label className="batch-video-field">
                           <span>结束秒</span>
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.1"
-                            value={clip.endTime}
-                            placeholder="到结尾"
-                            onChange={event => updateFinalClip(clip.id, { endTime: event.target.value })}
-                          />
+                          <div className="batch-video-clip-time-input-row">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.1"
+                              value={clip.endTime}
+                              placeholder="到结尾"
+                              onChange={event => updateFinalClip(clip.id, { endTime: event.target.value })}
+                            />
+                            <button
+                              type="button"
+                              className="batch-video-button ghost"
+                              onClick={() => setClipBoundaryFromPreview(clip.id, 'end')}
+                              disabled={!clip.videoUrl}
+                            >
+                              取当前为结束
+                            </button>
+                          </div>
                           <input
                             className="batch-video-clip-field-range"
                             type="range"

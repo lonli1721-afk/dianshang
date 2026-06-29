@@ -7358,6 +7358,19 @@ input::placeholder, textarea::placeholder {
   gap: 8px;
 }
 
+.batch-video-clip-time-input-row {
+  display: grid;
+  grid-template-columns: minmax(80px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.batch-video-clip-time-input-row .batch-video-button {
+  min-height: 38px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
 .batch-video-clip-trimmer {
   grid-column: 1 / -1;
   display: grid;
@@ -7472,6 +7485,7 @@ input::placeholder, textarea::placeholder {
   .batch-video-clip-body,
   .batch-video-clip-fields,
   .batch-video-clip-time-grid,
+  .batch-video-clip-time-input-row,
   .batch-video-scene-body {
     grid-template-columns: 1fr;
   }
