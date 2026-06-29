@@ -15,9 +15,11 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
+from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 import database as db
@@ -302,6 +304,169 @@ def _clean_text(text: str, limit: int = 240) -> str:
 
 def _product_memory_key(product_name: str) -> str:
     return re.sub(r"\s+", " ", (product_name or "").strip()).lower()
+
+
+def _cloud_sync_config() -> tuple[str, str]:
+    settings = getattr(deps, "settings_manager", None)
+    if not settings:
+        return "", ""
+    cloud_url = str(settings.get("cloud_url", "") or "").rstrip("/")
+    cloud_token = str(settings.get("cloud_token", "") or "")
+    return cloud_url, cloud_token
+
+
+def _is_self_cloud_url(cloud_url: str) -> bool:
+    public_base = (os.environ.get("PUBLIC_BASE_URL", "") or "").rstrip("/")
+    if not cloud_url or not public_base:
+        return False
+    try:
+        cloud = urlparse(cloud_url)
+        public = urlparse(public_base)
+    except Exception:
+        return cloud_url == public_base
+    cloud_host = (cloud.hostname or "").lower()
+    public_host = (public.hostname or "").lower()
+    if not cloud_host or cloud_host != public_host:
+        return False
+    cloud_port = cloud.port
+    public_port = public.port
+    return cloud_port is None or public_port is None or cloud_port == public_port
+
+
+def _is_cloud_forwarded_request(request: Request | None) -> bool:
+    if request is None:
+        return False
+    return (request.headers.get("X-Wanpi-Cloud-Sync") or "").strip() == "1"
+
+
+def _cloud_memory_url(product_name: str) -> str:
+    return f"/api/batch-video/product-memory?product_name={quote(product_name or '')}"
+
+
+def _absolute_cloud_file_url(url: str, cloud_url: str) -> str:
+    value = str(url or "")
+    if not value or value.startswith(("http://", "https://", "data:")):
+        return value
+    if value.startswith(("/api/files/", "/public-files/")):
+        return f"{cloud_url}{value}"
+    return value
+
+
+def _rewrite_memory_file_urls_for_cloud(memory: dict[str, Any], cloud_url: str) -> dict[str, Any]:
+    if not isinstance(memory, dict) or not cloud_url:
+        return memory
+
+    def rewrite(value):
+        if isinstance(value, str):
+            return _absolute_cloud_file_url(value, cloud_url)
+        if isinstance(value, list):
+            return [rewrite(item) for item in value]
+        if isinstance(value, dict):
+            return {key: rewrite(item) for key, item in value.items()}
+        return value
+
+    return rewrite(memory)
+
+
+def _collect_memory_local_file_paths(memory: dict[str, Any]) -> list[Path]:
+    paths: set[Path] = set()
+
+    def collect(value):
+        if isinstance(value, str):
+            try:
+                local_path = deps.get_local_file_path_from_url(value)
+            except Exception:
+                local_path = None
+            if local_path and local_path.is_file():
+                paths.add(Path(local_path))
+            return
+        if isinstance(value, list):
+            for item in value:
+                collect(item)
+            return
+        if isinstance(value, dict):
+            for item in value.values():
+                collect(item)
+
+    collect(memory)
+    return sorted(paths, key=lambda path: str(path))
+
+
+async def _upload_cloud_memory_files(memory: dict[str, Any], cloud_url: str, cloud_token: str) -> int:
+    client = deps.http_client
+    if client is None or not cloud_url or not cloud_token:
+        return 0
+    uploaded = 0
+    for path in _collect_memory_local_file_paths(memory):
+        try:
+            with path.open("rb") as file_obj:
+                resp = await client.post(
+                    f"{cloud_url}/api/sync/push-file",
+                    headers={
+                        "Authorization": f"Bearer {cloud_token}",
+                        "X-Wanpi-Cloud-Sync": "1",
+                    },
+                    files={"file": (path.name, file_obj, "application/octet-stream")},
+                    timeout=120,
+                )
+            if 200 <= resp.status_code < 300:
+                uploaded += 1
+        except Exception:
+            continue
+    return uploaded
+
+
+async def _fetch_cloud_product_memory(product_name: str, request: Request | None = None) -> dict[str, Any] | None:
+    if _is_cloud_forwarded_request(request):
+        return None
+    cloud_url, cloud_token = _cloud_sync_config()
+    if not cloud_url or not cloud_token or _is_self_cloud_url(cloud_url):
+        return None
+    try:
+        client = deps.http_client
+        if client is None:
+            return None
+        resp = await client.get(
+            f"{cloud_url}{_cloud_memory_url(product_name)}",
+            headers={
+                "Authorization": f"Bearer {cloud_token}",
+                "X-Wanpi-Cloud-Sync": "1",
+            },
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json() if resp.content else {}
+        memory = data.get("memory") if isinstance(data, dict) else None
+        return memory if isinstance(memory, dict) else None
+    except Exception:
+        return None
+
+
+async def _push_cloud_product_memory(product_name: str, memory: dict[str, Any], request: Request | None = None) -> bool:
+    if _is_cloud_forwarded_request(request):
+        return False
+    cloud_url, cloud_token = _cloud_sync_config()
+    if not cloud_url or not cloud_token or _is_self_cloud_url(cloud_url):
+        return False
+    try:
+        client = deps.http_client
+        if client is None:
+            return False
+        await _upload_cloud_memory_files(memory, cloud_url, cloud_token)
+        resp = await client.put(
+            f"{cloud_url}/api/batch-video/product-memory",
+            headers={
+                "Authorization": f"Bearer {cloud_token}",
+                "X-Wanpi-Cloud-Sync": "1",
+                "Content-Type": "application/json",
+            },
+            json={"product_name": product_name, "memory": memory},
+            timeout=20,
+        )
+        return 200 <= resp.status_code < 300
+    except Exception:
+        return False
 
 
 def _load_product_memories() -> dict[str, Any]:
@@ -2172,11 +2337,20 @@ async def save_workbench_draft(req: WorkbenchDraftRequest):
 
 
 @router.get("/product-memory")
-async def get_product_memory(product_name: str = ""):
+async def get_product_memory(request: Request, product_name: str = ""):
     key = _product_memory_key(product_name)
     if not key:
         return {"found": False, "memory": None, "updatedAt": 0}
-    memory = _load_product_memories().get(key)
+    memories = _load_product_memories()
+    memory = memories.get(key)
+    cloud_memory = await _fetch_cloud_product_memory(product_name, request)
+    cloud_url, _cloud_token = _cloud_sync_config()
+    if isinstance(cloud_memory, dict):
+        cloud_memory = _rewrite_memory_file_urls_for_cloud(cloud_memory, cloud_url)
+        if int(cloud_memory.get("updatedAt") or 0) > int((memory or {}).get("updatedAt") or 0):
+            memory = cloud_memory
+            memories[key] = cloud_memory
+            _save_product_memories(memories)
     if not isinstance(memory, dict):
         return {"found": False, "memory": None, "updatedAt": 0}
     return {
@@ -2187,17 +2361,19 @@ async def get_product_memory(product_name: str = ""):
 
 
 @router.put("/product-memory")
-async def save_product_memory(req: ProductMemoryRequest):
+async def save_product_memory(req: ProductMemoryRequest, request: Request):
     product_name = _clean_text(req.product_name or req.memory.get("productName", ""), 100)
     key = _product_memory_key(product_name)
     if not key:
         return {"ok": False, "updatedAt": 0, "message": "Product name is required."}
     memory = _normalize_product_memory(req.memory or {}, product_name)
-    memory["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+    if not _is_cloud_forwarded_request(request):
+        memory["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
     memories = _load_product_memories()
     memories[key] = memory
     _save_product_memories(memories)
-    return {"ok": True, "updatedAt": memory["updatedAt"], "memory": memory}
+    synced = await _push_cloud_product_memory(product_name, memory, request)
+    return {"ok": True, "updatedAt": memory["updatedAt"], "memory": memory, "cloudSynced": synced}
 
 
 @router.post("/product-reconstruction")

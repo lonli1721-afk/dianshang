@@ -51,6 +51,8 @@ const DEFAULT_STORYBOARD_SCENE_COUNT = 6
 const VEO_STORYBOARD_SCENE_COUNT = 4
 const VEO_STORYBOARD_DURATION = 8
 const WORKBENCH_DRAFT_STORAGE_KEY = 'ecommerce-batch-video-workbench-draft-v1'
+const PRODUCT_MEMORY_STORAGE_KEY = 'ecommerce-batch-video-product-memory-v1'
+const PRODUCT_MEMORY_CACHE_LIMIT = 80
 const DEFAULT_STORYBOARD_CREATIVE_BRIEF = '请根据上面的卖点，为我写6段5s的电商广告视频，分镜图片和视频提示词都按 Seedance 风格生成。'
 const VIDEO_SOUND_RULE = '【声音规则】生成单段视频时不要旁白、配音、人声或口播；不要唱歌、吟唱、Rap、歌词化表达或音乐化念白；不要背景音乐、BGM、配乐、音乐节奏或鼓点；只保留真实现场音效，例如脚步声、风声、水花声、材质与地面轻微摩擦声。'
 const DEFAULT_VOICEOVER_TEXT = '让每一步，都更可靠。'
@@ -995,6 +997,45 @@ function normalizeProductMemoryName(name) {
   return String(name || '').trim().replace(/\s+/g, ' ').toLowerCase()
 }
 
+function loadLocalProductMemories() {
+  if (typeof window === 'undefined') return {}
+  try {
+    const raw = window.localStorage.getItem(PRODUCT_MEMORY_STORAGE_KEY)
+    const parsed = raw ? JSON.parse(raw) : {}
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveLocalProductMemory(name, memory) {
+  if (typeof window === 'undefined') return null
+  const nameKey = normalizeProductMemoryName(name)
+  if (!nameKey || !productMemoryHasContent(memory)) return null
+  const memories = loadLocalProductMemories()
+  const nextMemory = {
+    ...memory,
+    productName: memory.productName || name,
+    updatedAt: Date.now(),
+  }
+  const items = Object.entries({ ...memories, [nameKey]: nextMemory })
+    .filter(([, value]) => value && typeof value === 'object')
+    .sort(([, a], [, b]) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
+    .slice(0, PRODUCT_MEMORY_CACHE_LIMIT)
+  const nextMemories = Object.fromEntries(items)
+  try {
+    window.localStorage.setItem(PRODUCT_MEMORY_STORAGE_KEY, JSON.stringify(nextMemories))
+  } catch {
+    // Backend memory remains the source of truth when browser storage is unavailable.
+  }
+  return nextMemory
+}
+
+function loadLocalProductMemory(name) {
+  const memory = loadLocalProductMemories()[normalizeProductMemoryName(name)]
+  return memory && typeof memory === 'object' ? memory : null
+}
+
 function buildProductMemorySnapshot({
   product,
   liveVideo,
@@ -1547,6 +1588,25 @@ export default function BatchVideoWorkbenchPage() {
       const previousNameKey = productMemoryPreviousNameKeyRef.current
       const shouldReplaceProductContent = Boolean(previousNameKey && previousNameKey !== nameKey)
       productMemoryPreviousNameKeyRef.current = nameKey
+      const applyRememberedMemory = (memory, statusText) => {
+        if (!productMemoryHasContent(memory)) return false
+        const memorySnapshot = buildProductMemorySnapshot({
+          product: memory.product,
+          liveVideo: memory.liveVideo,
+          transcript: memory.transcript,
+          manualSellingPoints: memory.manualSellingPoints,
+          sellingPoints: memory.sellingPoints,
+        })
+        const signature = productMemorySignature(memorySnapshot)
+        if (productMemoryApplyRef.current.nameKey !== nameKey || productMemoryApplyRef.current.signature !== signature) {
+          applyProductMemory(memory, { replace: shouldReplaceProductContent })
+          productMemoryApplyRef.current = { nameKey, signature }
+        }
+        productMemoryLastSavedRef.current = signature
+        productMemorySaveBaselineRef.current = { nameKey, signature }
+        setProductMemoryStatus({ state: 'loaded', text: statusText })
+        return true
+      }
       api.get(`/api/batch-video/product-memory?product_name=${encodeURIComponent(name)}`, { timeout: 20_000 })
         .then(data => {
           const currentFetch = productMemoryFetchRef.current
@@ -1568,6 +1628,9 @@ export default function BatchVideoWorkbenchPage() {
             productMemoryLastSavedRef.current = signature
             productMemorySaveBaselineRef.current = { nameKey, signature }
             setProductMemoryStatus({ state: 'loaded', text: '已载入这个产品之前保存的还原图、转写和卖点。' })
+            return
+          }
+          if (applyRememberedMemory(loadLocalProductMemory(name), '已从本机浏览器记忆里找回这个产品的上次内容。')) {
             return
           }
           productMemoryLastSavedRef.current = ''
@@ -1593,6 +1656,9 @@ export default function BatchVideoWorkbenchPage() {
         .catch(() => {
           const currentFetch = productMemoryFetchRef.current
           if (currentFetch.requestId === requestId && currentFetch.nameKey === nameKey) {
+            if (applyRememberedMemory(loadLocalProductMemory(name), '后端产品记忆读取失败，已从本机浏览器记忆找回。')) {
+              return
+            }
             setProductMemoryStatus({ state: 'error', text: '产品记忆读取失败，本次仍可继续生成。' })
           }
         })
@@ -1760,6 +1826,7 @@ export default function BatchVideoWorkbenchPage() {
     if (productMemorySaveTimerRef.current) {
       window.clearTimeout(productMemorySaveTimerRef.current)
     }
+    saveLocalProductMemory(product.name, memory)
     setProductMemoryStatus({ state: 'saving', text: '正在保存这个产品的记忆...' })
     productMemorySaveTimerRef.current = window.setTimeout(() => {
       api.put('/api/batch-video/product-memory', {
