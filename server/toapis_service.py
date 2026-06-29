@@ -16,6 +16,19 @@ logger = logging.getLogger("toapis")
 
 DEFAULT_BASE_URL = "https://toapis.com"
 SUPPORTED_ASPECT_RATIOS = {"16:9", "9:16", "3:2", "2:3", "1:1"}
+TOAPIS_IMAGE_MODELS = [
+    {
+        "id": "image2",
+        "name": "Image2",
+        "provider": "toapis",
+        "supports_ref_images": True,
+        "max_ref_images": 16,
+        "supported_qualities": ["1K", "2K", "4K"],
+        "default_quality": "2K",
+        "note": "通过 ToAPIs 官方渠道调用 GPT Image 2 / Image2。",
+    },
+]
+TOAPIS_IMAGE_MAX_REFERENCE_IMAGES = 16
 
 
 def _toapis_specs() -> list[dict]:
@@ -49,6 +62,56 @@ def _normalize_aspect_ratio(value: str) -> str:
     raw = (value or "").strip()
     return raw if raw in SUPPORTED_ASPECT_RATIOS else "9:16"
 
+
+def _normalize_image_model(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw or raw == "image2":
+        return "gpt-image-2"
+    return raw
+
+
+def _normalize_image_size(width: int = 1024, height: int = 1024, aspect_ratio: str = "") -> str:
+    ratio = (aspect_ratio or "").strip()
+    supported = {"1:1", "3:2", "2:3", "4:3", "3:4", "5:4", "4:5", "16:9", "9:16", "2:1", "1:2", "21:9", "9:21"}
+    if ratio in supported:
+        return ratio
+    if width > height:
+        value = width / max(1, height)
+        if value >= 2.15:
+            return "21:9"
+        if value >= 1.9:
+            return "2:1"
+        if value >= 1.65:
+            return "16:9"
+        if value >= 1.42:
+            return "3:2"
+        if value >= 1.23:
+            return "4:3"
+        return "5:4"
+    if height > width:
+        value = height / max(1, width)
+        if value >= 2.15:
+            return "9:21"
+        if value >= 1.9:
+            return "1:2"
+        if value >= 1.65:
+            return "9:16"
+        if value >= 1.42:
+            return "2:3"
+        if value >= 1.23:
+            return "3:4"
+        return "4:5"
+    return "1:1"
+
+
+def _normalize_image_resolution(value: str, size: str) -> str:
+    raw = (value or "").strip().upper()
+    requested = {"1K": "1k", "2K": "2k", "4K": "4k"}.get(raw, "2k")
+    if requested == "1k" and size not in {"1:1", "3:2", "2:3"}:
+        return "2k"
+    if requested == "4k" and size not in {"4:3", "3:4", "16:9", "9:16", "2:1", "1:2", "21:9", "9:21"}:
+        return "2k"
+    return requested
 
 def _normalize_resolution(value: str, spec: dict) -> str:
     raw = (value or "").strip().lower()
@@ -272,6 +335,50 @@ def _extract_video_url(data) -> str:
     return ""
 
 
+def _extract_image_url(data) -> str:
+    if isinstance(data, str):
+        value = data.strip()
+        if value.startswith("http"):
+            return value
+        if value.startswith("{") or value.startswith("["):
+            try:
+                return _extract_image_url(json.loads(value))
+            except (json.JSONDecodeError, TypeError):
+                return ""
+        return ""
+
+    if isinstance(data, list):
+        for item in data:
+            found = _extract_image_url(item)
+            if found:
+                return found
+        return ""
+
+    if not isinstance(data, dict):
+        return ""
+
+    for key in ("image_url", "url", "output_url", "result_url", "file_url"):
+        value = data.get(key)
+        if isinstance(value, str) and value.startswith("http"):
+            return value
+        found = _extract_image_url(value)
+        if found:
+            return found
+
+    for key in ("result", "data", "images", "image_urls", "output", "outputs", "results", "items"):
+        found = _extract_image_url(data.get(key))
+        if found:
+            return found
+
+    for key, value in data.items():
+        key_l = str(key).lower()
+        if any(token in key_l for token in ("image", "url", "result", "output")):
+            found = _extract_image_url(value)
+            if found:
+                return found
+    return ""
+
+
 def _extract_uploaded_image_url(data: dict) -> str:
     for key in ("url", "image_url", "file_url"):
         value = data.get(key)
@@ -335,6 +442,111 @@ class ToapisVideoService:
         }.get(ext, "image/png")
         content = await asyncio.to_thread(path.read_bytes)
         return await self.upload_image_bytes(path.name, content, mime_type)
+
+    async def generate_image(
+        self,
+        prompt: str,
+        model: str = "image2",
+        width: int = 1024,
+        height: int = 1024,
+        aspect_ratio: str = "",
+        reference_urls: list[str] | None = None,
+        image_quality: str = "2K",
+        output_format: str = "png",
+        timeout: int = 120,
+    ) -> dict:
+        api_model = _normalize_image_model(model)
+        refs = [url for url in (reference_urls or []) if url][:TOAPIS_IMAGE_MAX_REFERENCE_IMAGES]
+        size = _normalize_image_size(width, height, aspect_ratio)
+        payload = {
+            "model": api_model,
+            "prompt": prompt,
+            "size": size,
+            "resolution": _normalize_image_resolution(image_quality, size),
+            "n": 1,
+            "response_format": "url",
+        }
+        if refs:
+            payload["reference_images"] = refs
+
+        resp = await _toapis_request_with_retry(
+            "create_image",
+            "POST",
+            _join_url(self._base_url, "/v1/images/generations"),
+            timeout=60,
+            headers=self._headers(),
+            json=payload,
+        )
+        if resp.status_code >= 400:
+            logger.error(
+                "ToAPIs create image error %d payload=%s response=%s",
+                resp.status_code,
+                json.dumps(_redacted_payload_for_log(payload), ensure_ascii=False)[:1200],
+                resp.text[:800],
+            )
+            raise Exception(_toapis_error_message(resp.status_code, resp.text))
+
+        data = resp.json()
+        image_url = _extract_image_url(data)
+        if image_url:
+            return {
+                "images": [{"url": image_url, "mime_type": "image/png"}],
+                "image_url": image_url,
+                "provider": "toapis",
+                "model": model or "image2",
+                "api_model": api_model,
+            }
+
+        task_id = _extract_task_id(data)
+        if not task_id:
+            raise Exception(f"ToAPIs 未返回图片地址或任务 ID：{str(data)[:300]}")
+
+        deadline = asyncio.get_event_loop().time() + max(30, timeout)
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(3)
+            query = await self.query_image_task(task_id)
+            if query.get("status") == "completed" and query.get("image_url"):
+                return {
+                    "images": [{"url": query["image_url"], "mime_type": "image/png"}],
+                    "image_url": query["image_url"],
+                    "provider": "toapis",
+                    "model": model or "image2",
+                    "api_model": api_model,
+                    "task_id": task_id,
+                }
+            if query.get("status") == "failed":
+                raise Exception(query.get("error") or "ToAPIs 图片生成失败")
+        raise Exception(f"ToAPIs 图片生成超时，任务 ID：{task_id}")
+
+    async def query_image_task(self, task_id: str) -> dict:
+        resp = await _toapis_request_with_retry(
+            "query_image_task",
+            "GET",
+            _join_url(self._base_url, f"/v1/images/generations/{task_id}"),
+            timeout=30,
+            headers=self._headers(),
+        )
+        if resp.status_code >= 400:
+            return {
+                "task_id": task_id,
+                "status": "failed",
+                "image_url": "",
+                "provider": "toapis",
+                "error": _toapis_error_message(resp.status_code, resp.text),
+            }
+        data = resp.json()
+        raw_status = _extract_status(data)
+        status = _status_from_raw(raw_status)
+        image_url = _extract_image_url(data)
+        error = _extract_error_detail(data)[:500] if status == "failed" else ""
+        return {
+            "task_id": task_id,
+            "status": status,
+            "image_url": image_url,
+            "provider": "toapis",
+            "raw_status": raw_status,
+            "error": error,
+        }
 
     async def generate_video(
         self,

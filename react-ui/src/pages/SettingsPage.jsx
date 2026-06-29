@@ -86,7 +86,7 @@ const API_KEYS = [
     items: [
       { key: 'ark_api_key', title: 'ARK_API_KEY（火山引擎：Seedream 生图 + Seedance 生视频）', desc: '用于即梦 Seedream 图片生成和 Seedance 视频生成。前往', link: '火山引擎控制台', url: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey', accent: '#ff6b35' },
       { key: 'vidu_api_key', title: 'VIDU_API_KEY（Vidu 生视频）', desc: '用于 VIDU 视频生成（文生视频/图生视频）。前往', link: 'VIDU 开放平台', url: 'https://platform.vidu.cn/usage', accent: '#8b5cf6' },
-      { key: 'toapis_api_key', title: 'TOAPIS_API_KEY（ToAPIs 视频）', desc: '用于 ToAPIs 调用 Sora、Veo、Seedance、Kling、Wan、Grok、MiniMax、Vidu 等视频模型。前往', link: 'ToAPIs 文档', url: 'https://docs.toapis.com/docs/cn', accent: '#14b8a6' },
+      { key: 'toapis_api_key', title: 'TOAPIS_API_KEY（Image2 + ToAPIs 视频）', desc: '用于 ToAPIs 调用 Image2/GPT Image 2，以及 Sora、Veo、Seedance、Kling、Wan、Grok、MiniMax、Vidu 等视频模型。前往', link: 'ToAPIs 文档', url: 'https://docs.toapis.com/docs/cn', accent: '#14b8a6' },
       { key: 'toapis_base_url', title: 'ToAPIs Base URL（可选）', desc: '默认 https://toapis.com；如果你使用代理或自建兼容地址，可在这里填写。', link: 'ToAPIs', url: 'https://docs.toapis.com/docs/cn', accent: '#14b8a6', isUrl: true },
       { key: 'toapis_video_credit_prices', title: 'ToAPIs 视频积分单价 JSON', desc: '填写模型每秒积分，例如 {"veo3.1-fast":12,"sora-2-vvip":20}；未填写的模型会显示积分价未配置。前往', link: 'ToAPIs 模型市场', url: 'https://toapis.com/console/model', accent: '#14b8a6', secret: false },
       { key: 'toapis_usd_cny_rate', title: 'ToAPIs 美元兑人民币汇率', desc: '用于把 ToAPIs 积分费用预估成人民币，例如 7.2；留空时默认按 7.2 估算。前往', link: 'ToAPIs 余额', url: 'https://toapis.com/console/billing', accent: '#14b8a6', secret: false },

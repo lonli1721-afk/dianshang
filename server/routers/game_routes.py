@@ -1151,6 +1151,29 @@ async def generate_asset_image(req: GenerateAssetImageRequest):
             )
             if any(item.get("data") for item in result.get("images") or []):
                 result = await asyncio.to_thread(deps.save_base64_image_result, result, "openai")
+        elif req.provider == "toapis":
+            svc = _toapis()
+            if not svc:
+                raise Exception("ToAPIs API key is not configured")
+            ref_urls = []
+            for url in req.reference_urls:
+                resolved_ref = str(await _resolve_toapis_image_reference(url, svc) or "").strip()
+                if resolved_ref:
+                    ref_urls.append(resolved_ref)
+            result = await _provider_call(
+                "toapis",
+                "generate_image",
+                lambda: svc.generate_image(
+                    prompt=prompt,
+                    model=req.model or "image2",
+                    width=image_width,
+                    height=image_height,
+                    aspect_ratio=req.aspect_ratio,
+                    reference_urls=ref_urls,
+                    image_quality=req.image_quality,
+                    output_format=req.output_format or "png",
+                ),
+            )
         else:
             raise Exception(f"不支持的图片服务商: {req.provider}")
 
@@ -1186,6 +1209,9 @@ async def list_image_models():
     if _openai():
         from openai_service import OPENAI_IMAGE_MODELS
         models.extend(OPENAI_IMAGE_MODELS)
+    if _toapis():
+        from toapis_service import TOAPIS_IMAGE_MODELS
+        models.extend(TOAPIS_IMAGE_MODELS)
     return {"models": models}
 
 

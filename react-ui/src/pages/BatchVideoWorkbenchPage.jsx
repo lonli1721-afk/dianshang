@@ -32,13 +32,13 @@ const DEFAULT_LANGUAGE_MODELS = [
 ]
 
 const DEFAULT_IMAGE_MODELS = [
-  { id: 'image2', name: 'Image2 产品还原', provider: 'openai_image', available: true },
+  { id: 'image2', name: 'Image2 产品还原', provider: 'toapis', available: true },
   { id: 'seedream-5.0', name: 'Seedream 5.0', provider: 'jimeng', available: true },
   { id: 'seedream-4.5', name: 'Seedream 4.5', provider: 'jimeng', available: true },
   { id: 'nanobanana', name: 'Nano Banana', provider: 'custom_image', available: false },
 ]
 
-const OPENAI_IMAGE_REFERENCE_LIMIT = 4
+const IMAGE2_REFERENCE_LIMIT = 16
 
 const BATCH_NATIVE_VIDEO_MODEL_IDS = new Set(['seedance-2.0', 'happyhorse-1.0-i2v', 'happyhorse-1.0-t2v'])
 const DEFAULT_VIDEO_MODELS = FALLBACK_VIDEO_MODELS
@@ -1981,11 +1981,11 @@ export default function BatchVideoWorkbenchPage() {
       const result = await api.post('/api/game/generate_image', {
         project_id: '',
         prompt: plan.prompt,
-        provider: plan.provider || 'openai_image',
+        provider: plan.provider || 'toapis',
         model: plan.image_model || 'image2',
         aspect_ratio: '16:9',
         asset_type: 'product_detail_sheet',
-        reference_urls: (plan.reference_urls || product.imageUrls.map(item => item.url)).slice(0, OPENAI_IMAGE_REFERENCE_LIMIT),
+        reference_urls: (plan.reference_urls || product.imageUrls.map(item => item.url)).slice(0, IMAGE2_REFERENCE_LIMIT),
         prompt_optimize_mode: 'standard',
         image_quality: '2K',
         output_format: 'png',
@@ -2033,11 +2033,11 @@ export default function BatchVideoWorkbenchPage() {
       const result = await api.post('/api/game/generate_image', {
         project_id: '',
         prompt: plan.prompt,
-        provider: plan.provider || 'openai_image',
+        provider: plan.provider || 'toapis',
         model: plan.image_model || 'image2',
         aspect_ratio: plan.aspect_ratio || aspectRatio,
         asset_type: 'product_final_poster',
-        reference_urls: (plan.reference_urls || productReferences).slice(0, OPENAI_IMAGE_REFERENCE_LIMIT),
+        reference_urls: (plan.reference_urls || productReferences).slice(0, IMAGE2_REFERENCE_LIMIT),
         prompt_optimize_mode: 'standard',
         image_quality: '2K',
         output_format: 'png',

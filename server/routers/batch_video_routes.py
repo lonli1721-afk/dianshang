@@ -116,9 +116,9 @@ IMAGE_MODELS = [
     {
         "id": "image2",
         "name": "Image2 产品还原",
-        "provider": "openai_image",
+        "provider": "toapis",
         "available": True,
-        "note": "使用后端 OpenAI 配置调用 GPT Image 2 生成完整产品详情表",
+        "note": "使用 ToAPIs API 调用 Image2/GPT Image 2 生成完整产品详情表",
     },
     {
         "id": "nanobanana",
@@ -2380,7 +2380,7 @@ async def save_product_memory(req: ProductMemoryRequest, request: Request):
 async def build_product_reconstruction(req: ProductReconstructionRequest):
     reference_urls = [url for url in dict.fromkeys(req.product.image_urls or []) if str(url or "").strip()]
     image_provider = _model_provider(req.image_model or "image2", IMAGE_MODELS, "jimeng")
-    reference_limit = 4 if image_provider == "openai_image" else 8
+    reference_limit = 16 if image_provider == "toapis" else (4 if image_provider == "openai_image" else 8)
     if not reference_urls:
         return {
             "status": "needs_reference",
@@ -2412,8 +2412,8 @@ async def build_product_reconstruction(req: ProductReconstructionRequest):
 @router.post("/product-poster")
 async def build_product_poster(req: ProductPosterRequest):
     product_refs = [url for url in [req.product.detail_sheet_url, *(req.product.image_urls or [])] if str(url or "").strip()]
-    image_provider = _model_provider(req.image_model or "image2", IMAGE_MODELS, "openai_image")
-    reference_limit = 4 if image_provider == "openai_image" else 8
+    image_provider = _model_provider(req.image_model or "image2", IMAGE_MODELS, "toapis")
+    reference_limit = 16 if image_provider == "toapis" else (4 if image_provider == "openai_image" else 8)
     if not product_refs:
         return {
             "status": "needs_reference",
