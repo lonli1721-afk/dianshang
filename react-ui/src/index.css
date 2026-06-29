@@ -7352,9 +7352,51 @@ input::placeholder, textarea::placeholder {
 }
 
 .batch-video-clip-time-grid {
+  grid-column: 1 / -1;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+}
+
+.batch-video-clip-trimmer {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-primary);
+}
+
+.batch-video-clip-trimmer-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+  flex-wrap: wrap;
+}
+
+.batch-video-clip-range,
+.batch-video-clip-field-range {
+  width: 100%;
+}
+
+.batch-video-clip-field-range {
+  margin-top: 6px;
+}
+
+.batch-video-clip-trimmer-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.batch-video-clip-trimmer-actions .batch-video-button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 
 .batch-video-final-result {
@@ -7429,6 +7471,7 @@ input::placeholder, textarea::placeholder {
   .batch-video-poster-body,
   .batch-video-clip-body,
   .batch-video-clip-fields,
+  .batch-video-clip-time-grid,
   .batch-video-scene-body {
     grid-template-columns: 1fr;
   }

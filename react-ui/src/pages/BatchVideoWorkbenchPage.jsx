@@ -5,6 +5,7 @@ import {
   ArrowUp,
   Boxes,
   Clapperboard,
+  Copy,
   FileVideo,
   Image as ImageIcon,
   ListChecks,
@@ -485,6 +486,29 @@ function normalizeClipTime(value) {
   const number = Number(value)
   if (!Number.isFinite(number)) return ''
   return Math.max(0, Number(number.toFixed(2)))
+}
+
+function formatClipTime(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number) || number < 0) return '0.0s'
+  const minutes = Math.floor(number / 60)
+  const seconds = number - minutes * 60
+  if (!minutes) return `${seconds.toFixed(1)}s`
+  return `${minutes}m ${seconds.toFixed(1)}s`
+}
+
+function clipVideoElementId(clipId) {
+  return `clip-video-${String(clipId || '').replace(/[^A-Za-z0-9_-]/g, '_')}`
+}
+
+function clipSliderMax(clip, previewState = {}) {
+  const duration = Number(previewState.duration || 0)
+  const startTime = Number(clip?.startTime || 0)
+  const endTime = Number(clip?.endTime || 0)
+  const safeDuration = Number.isFinite(duration) ? duration : 0
+  const safeStartTime = Number.isFinite(startTime) ? startTime : 0
+  const safeEndTime = Number.isFinite(endTime) ? endTime : 0
+  return Number(Math.max(safeDuration, safeStartTime, safeEndTime, 8).toFixed(1))
 }
 
 function videoVersionOptionsForScene(scene) {
@@ -1194,6 +1218,7 @@ export default function BatchVideoWorkbenchPage() {
   const [batchResult, setBatchResult] = useState(() => initialDraft.batchResult)
   const [finalVideo, setFinalVideo] = useState(() => initialDraft.finalVideo || null)
   const [finalClips, setFinalClips] = useState(() => initialDraft.finalClips || [])
+  const [clipPreviewState, setClipPreviewState] = useState({})
   const [ttsVoiceType, setTtsVoiceType] = useState(() => initialDraft.ttsVoiceType || '')
   const [ttsCustomVoiceType, setTtsCustomVoiceType] = useState(() => initialDraft.ttsCustomVoiceType || '')
   const [ttsSpeedRatio, setTtsSpeedRatio] = useState(() => initialDraft.ttsSpeedRatio || 1)
@@ -1425,6 +1450,25 @@ export default function BatchVideoWorkbenchPage() {
     setFinalClips(prev => prev.filter(clip => clip.id !== clipId))
   }, [])
 
+  const duplicateFinalClip = useCallback((clipId) => {
+    setFinalClips(prev => {
+      const index = prev.findIndex(clip => clip.id === clipId)
+      if (index < 0) return prev
+      const source = prev[index]
+      const nextClip = normalizeFinalClip({
+        ...source,
+        id: `clip_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        startTime: source.endTime !== '' ? source.endTime : source.startTime,
+        endTime: '',
+      }, index + 1, scenes)
+      if (!nextClip) return prev
+      const next = [...prev]
+      next.splice(index + 1, 0, nextClip)
+      return next
+    })
+    setNotice({ type: 'success', text: '已复制为新的剪辑片段，可以在同一个视频里截取另一段不连续内容。' })
+  }, [scenes])
+
   const moveFinalClip = useCallback((clipId, direction) => {
     setFinalClips(prev => {
       const index = prev.findIndex(clip => clip.id === clipId)
@@ -1435,6 +1479,63 @@ export default function BatchVideoWorkbenchPage() {
       next.splice(nextIndex, 0, item)
       return next
     })
+  }, [])
+
+  const updateClipPreviewState = useCallback((clipId, patch) => {
+    setClipPreviewState(prev => ({
+      ...prev,
+      [clipId]: {
+        ...(prev[clipId] || {}),
+        ...patch,
+      },
+    }))
+  }, [])
+
+  const seekClipPreview = useCallback((clipId, seconds) => {
+    const nextTime = normalizeClipTime(seconds)
+    if (nextTime === '') return
+    const video = typeof document === 'undefined' ? null : document.getElementById(clipVideoElementId(clipId))
+    if (video) video.currentTime = nextTime
+    updateClipPreviewState(clipId, { currentTime: nextTime })
+  }, [updateClipPreviewState])
+
+  const setClipBoundaryFromPreview = useCallback((clipId, boundary) => {
+    const previewState = clipPreviewState[clipId] || {}
+    const currentTime = normalizeClipTime(previewState.currentTime)
+    if (currentTime === '') return
+    updateFinalClip(clipId, boundary === 'start'
+      ? { startTime: currentTime }
+      : { endTime: currentTime })
+  }, [clipPreviewState, updateFinalClip])
+
+  const previewFinalClip = useCallback((clip) => {
+    const video = typeof document === 'undefined' ? null : document.getElementById(clipVideoElementId(clip.id))
+    if (!video) return
+    const startTime = normalizeClipTime(clip.startTime)
+    const endTime = normalizeClipTime(clip.endTime)
+    if (video._batchClipStopAtEnd) {
+      video.removeEventListener('timeupdate', video._batchClipStopAtEnd)
+      video._batchClipStopAtEnd = null
+    }
+    video.currentTime = startTime === '' ? 0 : startTime
+    if (endTime !== '') {
+      const stopAtEnd = () => {
+        if (video.currentTime >= endTime) {
+          video.pause()
+          video.removeEventListener('timeupdate', stopAtEnd)
+          video._batchClipStopAtEnd = null
+        }
+      }
+      video._batchClipStopAtEnd = stopAtEnd
+      video.addEventListener('timeupdate', stopAtEnd)
+      video.addEventListener('ended', () => {
+        video.pause()
+        video.removeEventListener('timeupdate', stopAtEnd)
+        video._batchClipStopAtEnd = null
+      }, { once: true })
+    }
+    const playResult = video.play?.()
+    if (playResult?.catch) playResult.catch(() => {})
   }, [])
 
   const updateFinalClipScene = useCallback((clipId, nextSceneId) => {
@@ -3607,6 +3708,11 @@ export default function BatchVideoWorkbenchPage() {
             {finalClips.map((clip, index) => {
               const currentScene = scenes.find(scene => scene.id === clip.sceneId) || scenes[0]
               const videoOptions = videoVersionOptionsForScene(currentScene)
+              const previewState = clipPreviewState[clip.id] || {}
+              const sliderMax = clipSliderMax(clip, previewState)
+              const currentPreviewTime = Math.min(Number(previewState.currentTime || 0), sliderMax)
+              const clipStartValue = clip.startTime === '' ? 0 : Number(clip.startTime || 0)
+              const clipEndValue = clip.endTime === '' ? sliderMax : Number(clip.endTime || 0)
               return (
                 <div className="batch-video-clip-row" key={clip.id}>
                   <div className="batch-video-clip-head">
@@ -3618,6 +3724,9 @@ export default function BatchVideoWorkbenchPage() {
                       <button type="button" title="下移" onClick={() => moveFinalClip(clip.id, 1)} disabled={index === finalClips.length - 1}>
                         <ArrowDown size={14} />
                       </button>
+                      <button type="button" title="复制片段，截取同一视频另一段" onClick={() => duplicateFinalClip(clip.id)}>
+                        <Copy size={14} />
+                      </button>
                       <button type="button" title="删除片段" onClick={() => removeFinalClip(clip.id)}>
                         <Trash2 size={14} />
                       </button>
@@ -3626,7 +3735,22 @@ export default function BatchVideoWorkbenchPage() {
                   <div className="batch-video-clip-body">
                     <div className="batch-video-clip-preview">
                       {clip.videoUrl ? (
-                        <video src={assetUrl(clip.videoUrl)} controls preload="metadata" />
+                        <video
+                          id={clipVideoElementId(clip.id)}
+                          src={assetUrl(clip.videoUrl)}
+                          controls
+                          preload="metadata"
+                          onLoadedMetadata={event => {
+                            const nextDuration = Number(event.currentTarget.duration || 0)
+                            updateClipPreviewState(clip.id, {
+                              duration: Number.isFinite(nextDuration) ? nextDuration : 0,
+                              currentTime: Number(event.currentTarget.currentTime || 0),
+                            })
+                          }}
+                          onTimeUpdate={event => updateClipPreviewState(clip.id, {
+                            currentTime: Number(event.currentTarget.currentTime || 0),
+                          })}
+                        />
                       ) : (
                         <span>未选择视频</span>
                       )}
@@ -3650,6 +3774,7 @@ export default function BatchVideoWorkbenchPage() {
                               videoUrl: event.target.value,
                               sourceLabel: selected?.label || selected?.source || '',
                             })
+                            updateClipPreviewState(clip.id, { currentTime: 0, duration: 0 })
                           }}
                         >
                           {videoOptions.length ? videoOptions.map((item, optionIndex) => (
@@ -3661,6 +3786,38 @@ export default function BatchVideoWorkbenchPage() {
                           )}
                         </select>
                       </label>
+                      {clip.videoUrl && (
+                        <div className="batch-video-clip-trimmer">
+                          <div className="batch-video-clip-trimmer-head">
+                            <span>当前画面 {formatClipTime(currentPreviewTime)}</span>
+                            <span>
+                              截取 {formatClipTime(clipStartValue)}
+                              {' - '}
+                              {clip.endTime === '' ? '结尾' : formatClipTime(clipEndValue)}
+                            </span>
+                          </div>
+                          <input
+                            className="batch-video-clip-range"
+                            type="range"
+                            min="0"
+                            max={sliderMax}
+                            step="0.1"
+                            value={currentPreviewTime}
+                            onChange={event => seekClipPreview(clip.id, event.target.value)}
+                          />
+                          <div className="batch-video-clip-trimmer-actions">
+                            <button type="button" className="batch-video-button ghost" onClick={() => setClipBoundaryFromPreview(clip.id, 'start')}>
+                              设为开始
+                            </button>
+                            <button type="button" className="batch-video-button ghost" onClick={() => setClipBoundaryFromPreview(clip.id, 'end')}>
+                              设为结束
+                            </button>
+                            <button type="button" className="batch-video-button ghost" onClick={() => previewFinalClip(clip)}>
+                              试看片段
+                            </button>
+                          </div>
+                        </div>
+                      )}
                       <div className="batch-video-clip-time-grid">
                         <label className="batch-video-field">
                           <span>开始秒</span>
@@ -3669,6 +3826,15 @@ export default function BatchVideoWorkbenchPage() {
                             min="0"
                             step="0.1"
                             value={clip.startTime}
+                            onChange={event => updateFinalClip(clip.id, { startTime: event.target.value })}
+                          />
+                          <input
+                            className="batch-video-clip-field-range"
+                            type="range"
+                            min="0"
+                            max={sliderMax}
+                            step="0.1"
+                            value={Math.min(clipStartValue, sliderMax)}
                             onChange={event => updateFinalClip(clip.id, { startTime: event.target.value })}
                           />
                         </label>
@@ -3680,6 +3846,15 @@ export default function BatchVideoWorkbenchPage() {
                             step="0.1"
                             value={clip.endTime}
                             placeholder="到结尾"
+                            onChange={event => updateFinalClip(clip.id, { endTime: event.target.value })}
+                          />
+                          <input
+                            className="batch-video-clip-field-range"
+                            type="range"
+                            min="0"
+                            max={sliderMax}
+                            step="0.1"
+                            value={Math.min(clipEndValue, sliderMax)}
                             onChange={event => updateFinalClip(clip.id, { endTime: event.target.value })}
                           />
                         </label>
