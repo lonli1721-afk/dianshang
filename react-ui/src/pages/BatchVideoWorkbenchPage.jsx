@@ -612,6 +612,14 @@ function videoModelResolutionOptions(model) {
   return options.length ? options : ['720p']
 }
 
+function videoModelRequestedResolution(model, fallbackResolution) {
+  const options = videoModelResolutionOptions(model)
+  const requested = String(fallbackResolution || '').trim() || String(model?.default_resolution || '').trim()
+  if (requested && options.includes(requested)) return requested
+  if (model?.default_resolution && options.includes(model.default_resolution)) return model.default_resolution
+  return options[0] || '720p'
+}
+
 function estimateVideoModelCost(model, fallbackDuration) {
   const price = Number(model?.price_per_second || 0)
   const priceUnit = String(model?.price_unit || '').toLowerCase()
@@ -2456,6 +2464,7 @@ export default function BatchVideoWorkbenchPage() {
       const firstFrameOnly = videoModel === 'happyhorse-1.0-i2v' || videoModel.startsWith('vidu')
       const referenceImageMode = provider === 'toapis'
       const requestDuration = videoModelRequestedDuration(selectedModel, duration)
+      const requestResolution = videoModelRequestedResolution(selectedModel, videoResolution)
       const requestAspectRatio = referenceImageMode ? normalizeVeoAspectRatio(aspectRatio) : aspectRatio
       const body = {
         project_id: '',
@@ -2464,7 +2473,7 @@ export default function BatchVideoWorkbenchPage() {
         model: videoModel,
         duration: requestDuration,
         aspect_ratio: requestAspectRatio,
-        resolution: videoResolution,
+        resolution: requestResolution,
         image_url: firstFrameOnly || referenceImageMode ? (refImages[0] || '') : '',
         character_refs: [],
         scene_refs: firstFrameOnly || referenceImageMode ? [] : refImages,
@@ -2649,6 +2658,7 @@ export default function BatchVideoWorkbenchPage() {
     setNotice(null)
     try {
       const veoMode = isVeoModel(videoModel)
+      const requestResolution = videoModelRequestedResolution(selectedVideoModel, videoResolution)
       const result = await api.post('/api/batch-video/submit', {
         product: productPayload,
         scenes,
@@ -2656,7 +2666,7 @@ export default function BatchVideoWorkbenchPage() {
         video_model: videoModel,
         aspect_ratio: veoMode ? normalizeVeoAspectRatio(aspectRatio) : aspectRatio,
         duration: veoMode ? 8 : duration,
-        resolution: videoResolution,
+        resolution: requestResolution,
       })
       setBatchResult(result)
       setNotice({ type: 'success', text: result.message || '批量任务已整理完成。' })

@@ -1843,6 +1843,15 @@ async def generate_video(req: GenerateVideoRequest):
                 raise HTTPException(400, f"{validation.model_spec.get('name') or model} 需要至少 {min_refs} 张有效参考图，请重新上传分镜图后再试。")
             if raw_refs and not image_urls:
                 raise HTTPException(400, "ToAPIs 参考图解析失败：当前分镜图没有得到可提交的公网图片地址，请重新上传或重新生成分镜图后再试。")
+            logger.info(
+                "Submitting ToAPIs video model=%s duration=%s resolution=%s aspect=%s raw_refs=%s resolved_refs=%s",
+                model,
+                req.duration,
+                req.resolution,
+                req.aspect_ratio,
+                len(raw_refs),
+                len(image_urls),
+            )
             result = await _provider_call(
                 "toapis",
                 "generate_video",
@@ -1857,6 +1866,13 @@ async def generate_video(req: GenerateVideoRequest):
                 ),
             )
             deps._video_tasks[result["task_id"]] = {**result, "provider": "toapis"}
+            await _record_operation_success(
+                "generate_video",
+                project_id=req.project_id,
+                provider="toapis",
+                model=model,
+                task_id=result["task_id"],
+            )
             task_record_payload = build_generate_task_record_payload(
                 project_id=req.project_id,
                 prompt=video_prompt,

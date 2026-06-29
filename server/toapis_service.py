@@ -610,6 +610,16 @@ class ToapisVideoService:
             payload["generate_audio"] = False
             payload["audio"] = False
 
+        logger.info(
+            "ToAPIs create video request model=%s api_model=%s duration=%s aspect=%s resolution=%s refs=%s payload=%s",
+            model_id,
+            api_model,
+            normalized_duration,
+            _normalize_aspect_ratio(aspect_ratio),
+            normalized_resolution,
+            len(refs),
+            json.dumps(_redacted_payload_for_log(payload), ensure_ascii=False)[:1200],
+        )
         resp = await _toapis_request_with_retry(
             "create_video",
             "POST",
@@ -631,13 +641,18 @@ class ToapisVideoService:
         task_id = _extract_task_id(data)
         if not task_id:
             raise Exception(f"ToAPIs 未返回任务 ID：{str(data)[:300]}")
+        raw_status = _extract_status(data)
+        logger.info("ToAPIs create video accepted task_id=%s model=%s api_model=%s status=%s", task_id, model_id, api_model, raw_status)
         return {
             "task_id": task_id,
+            "id": task_id,
             "status": "processing",
             "provider": "toapis",
             "model": model_id,
             "api_model": api_model,
             "duration": normalized_duration,
+            "raw_status": raw_status,
+            "progress": data.get("progress"),
         }
 
     async def query_task(self, task_id: str) -> dict:
