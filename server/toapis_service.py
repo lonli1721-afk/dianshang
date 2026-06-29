@@ -593,7 +593,12 @@ class ToapisVideoService:
         if spec.get("toapis_mode_from_resolution"):
             payload["mode"] = "pro" if normalized_resolution == "1080p" else "std"
         elif normalized_resolution:
-            payload["resolution"] = normalized_resolution
+            resolution_field = str(spec.get("toapis_resolution_payload") or "resolution")
+            if resolution_field == "metadata":
+                payload.setdefault("metadata", {})["resolution"] = normalized_resolution
+                payload["metadata"].setdefault("enable_gif", False)
+            else:
+                payload[resolution_field] = normalized_resolution
 
         refs = [url for url in (image_urls or []) if url][:int(spec.get("max_ref_images") or 0 or 3)]
         _append_image_refs(payload, refs, spec)

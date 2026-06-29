@@ -995,15 +995,13 @@ export const FALLBACK_VIDEO_MODELS = [
     "supports_ref_images": true,
     "min_duration": 8,
     "max_duration": 8,
-    "max_ref_images": 3,
+    "max_ref_images": 1,
     "supported_aspect_ratios": [
       "16:9",
       "9:16"
     ],
     "supported_resolutions": [
-      "720p",
-      "1080p",
-      "4k"
+      "720p"
     ],
     "default_resolution": "720p",
     "limit_note": "ToAPIs async video model. Use public image URLs; exact billing is shown when credit price is configured.",
@@ -1018,6 +1016,7 @@ export const FALLBACK_VIDEO_MODELS = [
     "toapis_ref_image_payload": "image_urls",
     "toapis_duration_payload": "duration",
     "toapis_aspect_payload": "aspect_ratio",
+    "toapis_resolution_payload": "metadata",
     "duration_choices": [
       8
     ]
@@ -1031,15 +1030,13 @@ export const FALLBACK_VIDEO_MODELS = [
     "supports_ref_images": true,
     "min_duration": 8,
     "max_duration": 8,
-    "max_ref_images": 3,
+    "max_ref_images": 1,
     "supported_aspect_ratios": [
       "16:9",
       "9:16"
     ],
     "supported_resolutions": [
-      "720p",
-      "1080p",
-      "4k"
+      "720p"
     ],
     "default_resolution": "720p",
     "limit_note": "ToAPIs async video model. Use public image URLs; exact billing is shown when credit price is configured.",
@@ -1054,6 +1051,7 @@ export const FALLBACK_VIDEO_MODELS = [
     "toapis_ref_image_payload": "image_urls",
     "toapis_duration_payload": "duration",
     "toapis_aspect_payload": "aspect_ratio",
+    "toapis_resolution_payload": "metadata",
     "duration_choices": [
       8
     ]
@@ -1067,7 +1065,7 @@ export const FALLBACK_VIDEO_MODELS = [
     "supports_ref_images": true,
     "min_duration": 8,
     "max_duration": 8,
-    "max_ref_images": 2,
+    "max_ref_images": 1,
     "supported_aspect_ratios": [
       "16:9",
       "9:16"
@@ -1090,6 +1088,7 @@ export const FALLBACK_VIDEO_MODELS = [
     "toapis_ref_image_payload": "image_urls",
     "toapis_duration_payload": "duration",
     "toapis_aspect_payload": "aspect_ratio",
+    "toapis_resolution_payload": "metadata",
     "duration_choices": [
       8
     ]
