@@ -289,7 +289,7 @@ class ComposeFinalVideoRequest(BaseModel):
     bgm_enabled: bool = True
     bgm_url: str = ""
     original_audio_volume: float = 0.78
-    voiceover_volume: float = 1.0
+    voiceover_volume: float = 1.35
     bgm_volume: float = 0.45
     poster_image_url: str = ""
     poster_duration: float = 2.0

@@ -7122,7 +7122,7 @@ input::placeholder, textarea::placeholder {
 
 .batch-video-tts-toolbar {
   display: grid;
-  grid-template-columns: minmax(180px, 240px) minmax(180px, 1fr) 118px;
+  grid-template-columns: minmax(180px, 240px) minmax(180px, 1fr) 118px minmax(180px, 260px);
   gap: 8px;
   align-items: end;
   margin-bottom: 10px;
@@ -7161,6 +7161,16 @@ input::placeholder, textarea::placeholder {
 
 .batch-video-bgm-volume {
   min-width: 0;
+}
+
+.batch-video-voiceover-volume {
+  min-width: 0;
+}
+
+.batch-video-voiceover-volume input[type="range"] {
+  width: 100%;
+  padding: 0;
+  min-height: 22px;
 }
 
 .batch-video-bgm-volume input[type="range"] {

@@ -61,6 +61,7 @@ const CLIP_PLAYBACK_RATE_OPTIONS = [
 const DEFAULT_STORYBOARD_SCENE_COUNT = 6
 const VEO_STORYBOARD_SCENE_COUNT = 4
 const VEO_STORYBOARD_DURATION = 8
+const DEFAULT_VOICEOVER_VOLUME = 1.35
 const WORKBENCH_DRAFT_STORAGE_KEY = 'ecommerce-batch-video-workbench-draft-v1'
 const PRODUCT_MEMORY_STORAGE_KEY = 'ecommerce-batch-video-product-memory-v1'
 const PRODUCT_MEMORY_CACHE_LIMIT = 80
@@ -276,6 +277,7 @@ function createDefaultDraft() {
     ttsVoiceType: '',
     ttsCustomVoiceType: '',
     ttsSpeedRatio: 1,
+    voiceoverVolume: DEFAULT_VOICEOVER_VOLUME,
     bgmEnabled: true,
     bgmUrl: '',
     bgmName: '',
@@ -309,6 +311,7 @@ function buildWorkbenchDraftSnapshot({
   ttsVoiceType,
   ttsCustomVoiceType,
   ttsSpeedRatio,
+  voiceoverVolume,
   bgmEnabled,
   bgmUrl,
   bgmName,
@@ -340,6 +343,7 @@ function buildWorkbenchDraftSnapshot({
     ttsVoiceType,
     ttsCustomVoiceType,
     ttsSpeedRatio,
+    voiceoverVolume,
     bgmEnabled,
     bgmUrl,
     bgmName,
@@ -978,6 +982,7 @@ function normalizeDraft(rawDraft) {
   const rawTtsVoiceType = typeof rawDraft.ttsVoiceType === 'string' ? rawDraft.ttsVoiceType : fallback.ttsVoiceType
   const ttsVoiceType = TTS_VOICE_OPTIONS.some(item => item.id === rawTtsVoiceType) ? rawTtsVoiceType : 'custom'
   const ttsSpeedRatio = Number(rawDraft.ttsSpeedRatio)
+  const voiceoverVolume = Number(rawDraft.voiceoverVolume)
   const bgmUrl = typeof rawDraft.bgmUrl === 'string' ? rawDraft.bgmUrl : ''
   const bgmVolume = Number(rawDraft.bgmVolume)
   const normalizedBgmVolume = Number.isFinite(bgmVolume) ? Math.max(0, Math.min(1, bgmVolume)) : fallback.bgmVolume
@@ -1018,6 +1023,7 @@ function normalizeDraft(rawDraft) {
       ? rawDraft.ttsCustomVoiceType
       : (ttsVoiceType === 'custom' ? rawTtsVoiceType : ''),
     ttsSpeedRatio: Number.isFinite(ttsSpeedRatio) ? Math.max(0.6, Math.min(1.4, ttsSpeedRatio)) : fallback.ttsSpeedRatio,
+    voiceoverVolume: Number.isFinite(voiceoverVolume) ? Math.max(0.2, Math.min(2, voiceoverVolume)) : fallback.voiceoverVolume,
     bgmEnabled: typeof rawDraft.bgmEnabled === 'boolean' ? rawDraft.bgmEnabled : fallback.bgmEnabled,
     bgmUrl,
     bgmName: typeof rawDraft.bgmName === 'string' ? rawDraft.bgmName : '',
@@ -1239,6 +1245,7 @@ export default function BatchVideoWorkbenchPage() {
   const [ttsVoiceType, setTtsVoiceType] = useState(() => initialDraft.ttsVoiceType || '')
   const [ttsCustomVoiceType, setTtsCustomVoiceType] = useState(() => initialDraft.ttsCustomVoiceType || '')
   const [ttsSpeedRatio, setTtsSpeedRatio] = useState(() => initialDraft.ttsSpeedRatio || 1)
+  const [voiceoverVolume, setVoiceoverVolume] = useState(() => initialDraft.voiceoverVolume ?? DEFAULT_VOICEOVER_VOLUME)
   const [bgmEnabled, setBgmEnabled] = useState(() => initialDraft.bgmEnabled !== false)
   const [bgmUrl, setBgmUrl] = useState(() => initialDraft.bgmUrl || '')
   const [bgmName, setBgmName] = useState(() => initialDraft.bgmName || '')
@@ -1385,6 +1392,7 @@ export default function BatchVideoWorkbenchPage() {
     setTtsVoiceType(nextDraft.ttsVoiceType)
     setTtsCustomVoiceType(nextDraft.ttsCustomVoiceType)
     setTtsSpeedRatio(nextDraft.ttsSpeedRatio)
+    setVoiceoverVolume(nextDraft.voiceoverVolume)
     setBgmEnabled(nextDraft.bgmEnabled)
     setBgmUrl(nextDraft.bgmUrl)
     setBgmName(nextDraft.bgmName)
@@ -1889,6 +1897,7 @@ export default function BatchVideoWorkbenchPage() {
       ttsVoiceType,
       ttsCustomVoiceType,
       ttsSpeedRatio,
+      voiceoverVolume,
       bgmEnabled,
       bgmUrl,
       bgmName,
@@ -1937,6 +1946,7 @@ export default function BatchVideoWorkbenchPage() {
     ttsCustomVoiceType,
     ttsSpeedRatio,
     ttsVoiceType,
+    voiceoverVolume,
     variantCount,
     videoModel,
     videoResolution,
@@ -2844,6 +2854,7 @@ export default function BatchVideoWorkbenchPage() {
     try {
       const selectedTtsVoiceType = ttsVoiceType === 'custom' ? ttsCustomVoiceType.trim() : ttsVoiceType
       const selectedBgmVolume = clampNumber(bgmVolume, 0, 1, 0.45)
+      const selectedVoiceoverVolume = clampNumber(voiceoverVolume, 0.2, 2, DEFAULT_VOICEOVER_VOLUME)
       const result = await api.post('/api/batch-video/compose-final-video', {
         segments,
         product_name: product.name || '',
@@ -2854,7 +2865,7 @@ export default function BatchVideoWorkbenchPage() {
         bgm_enabled: bgmEnabled,
         bgm_url: bgmEnabled ? bgmUrl : '',
         original_audio_volume: 0.78,
-        voiceover_volume: 1,
+        voiceover_volume: selectedVoiceoverVolume,
         bgm_volume: selectedBgmVolume,
         poster_image_url: productPosterUrl || '',
         poster_duration: 0,
@@ -3603,6 +3614,17 @@ export default function BatchVideoWorkbenchPage() {
               step="0.05"
               value={ttsSpeedRatio}
               onChange={event => setTtsSpeedRatio(event.target.value)}
+            />
+          </label>
+          <label className="batch-video-field batch-video-voiceover-volume">
+            <span>旁白音量 {Math.round(clampNumber(voiceoverVolume, 0.2, 2, DEFAULT_VOICEOVER_VOLUME) * 100)}%</span>
+            <input
+              type="range"
+              min="0.2"
+              max="2"
+              step="0.05"
+              value={voiceoverVolume}
+              onChange={event => setVoiceoverVolume(event.target.value)}
             />
           </label>
         </div>
