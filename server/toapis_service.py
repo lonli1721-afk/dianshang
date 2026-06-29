@@ -602,6 +602,8 @@ class ToapisVideoService:
 
         refs = [url for url in (image_urls or []) if url][:int(spec.get("max_ref_images") or 0 or 3)]
         _append_image_refs(payload, refs, spec)
+        if refs and spec.get("toapis_generation_type"):
+            payload.setdefault("metadata", {})["generation_type"] = str(spec["toapis_generation_type"])
         if refs and spec.get("toapis_ref_task_type"):
             payload["task_type"] = str(spec["toapis_ref_task_type"])
         if webhook_url:

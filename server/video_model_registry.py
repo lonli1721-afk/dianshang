@@ -108,6 +108,7 @@ def _toapis_spec(
     duration_payload: str = "duration",
     aspect_payload: str = "aspect_ratio",
     resolution_payload: str = "resolution",
+    generation_type: str = "",
     ref_task_type: str = "",
     mode_from_resolution: bool = False,
     prompt_image_tokens: bool = False,
@@ -145,6 +146,8 @@ def _toapis_spec(
         spec["min_ref_images"] = min_ref_images
     if duration_choices:
         spec["duration_choices"] = duration_choices
+    if generation_type:
+        spec["toapis_generation_type"] = generation_type
     if mode_from_resolution:
         spec["toapis_mode_from_resolution"] = True
     if prompt_image_tokens:
@@ -186,9 +189,9 @@ def _toapis_video_model_specs(price_overrides: dict[str, float] | None = None) -
         _toapis_spec("sora-2-official", "ToAPIs Azure Sora 2 Official", min_duration=4, max_duration=12, duration_choices=[4, 8, 12], max_ref_images=1),
         _toapis_spec("sora-2-vvip", "ToAPIs Sora 2 VVIP", min_duration=4, max_duration=12, duration_choices=[4, 8, 12], max_ref_images=3),
         _toapis_spec("Veo3.1-quality-official", "ToAPIs Veo 3.1 Quality Official", min_duration=4, max_duration=8, duration_choices=[4, 6, 8], max_ref_images=1, supported_resolutions=["720p", "1080p", "4k"], aspect_payload="size"),
-        _toapis_spec("veo3.1-fast", "Veo 3.1 Fast", min_duration=8, max_duration=8, duration_choices=[8], max_ref_images=1, supported_resolutions=["720p"], resolution_payload="metadata"),
-        _toapis_spec("veo3.1-lite", "Veo 3.1 Lite", min_duration=8, max_duration=8, duration_choices=[8], max_ref_images=1, supported_resolutions=["720p"], resolution_payload="metadata"),
-        _toapis_spec("veo3.1-quality", "Veo 3.1 Quality", min_duration=8, max_duration=8, duration_choices=[8], max_ref_images=1, supported_resolutions=["720p", "1080p", "4k"], resolution_payload="metadata"),
+        _toapis_spec("veo3.1-fast", "Veo 3.1 Fast", min_duration=8, max_duration=8, duration_choices=[8], max_ref_images=1, supported_resolutions=["720p"], resolution_payload="metadata", generation_type="frame"),
+        _toapis_spec("veo3.1-lite", "Veo 3.1 Lite", min_duration=8, max_duration=8, duration_choices=[8], max_ref_images=1, supported_resolutions=["720p"], resolution_payload="metadata", generation_type="frame"),
+        _toapis_spec("veo3.1-quality", "Veo 3.1 Quality", min_duration=8, max_duration=8, duration_choices=[8], max_ref_images=1, supported_resolutions=["720p", "1080p", "4k"], resolution_payload="metadata", generation_type="frame"),
         _toapis_spec("toapis-viduq3-pro", "ToAPIs Vidu Q3 Pro", api_model="viduq3-pro", min_duration=3, max_duration=16, max_ref_images=1, supported_resolutions=["720p", "1080p"]),
         _toapis_spec("toapis-viduq3-turbo", "ToAPIs Vidu Q3 Turbo", api_model="viduq3-turbo", min_duration=3, max_duration=16, max_ref_images=1, supported_resolutions=["720p", "1080p"]),
         _toapis_spec("toapis-viduq3", "ToAPIs Vidu Q3 Reference", api_model="viduq3", min_duration=3, max_duration=16, min_ref_images=1, max_ref_images=7, supported_resolutions=["540p", "720p", "1080p"]),

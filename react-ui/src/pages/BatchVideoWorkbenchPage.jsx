@@ -2437,6 +2437,9 @@ export default function BatchVideoWorkbenchPage() {
         '不要泛化成普通黑灰跑鞋，不要换品牌标识、不要换鞋底结构、不要把高辨识度撞色区域改掉；如果模型难以稳定跟随，宁可减少脚步幅度和镜头运动，也要保住同一双鞋。',
       ].join(' ')
       const referenceVideoPrompt = [
+        provider === 'toapis' && !isProductDetailEnding
+          ? '【Veo 首帧锁定】第 1 张输入图就是当前最终版分镜图，并且已按 frame 模式提交给视频模型。视频第 0 秒第一帧必须从这张分镜图无缝开始，构图、鞋型、鞋底齿纹、鞋面分区、鞋带孔、品牌位置、配色、磨损/水滴/岩石环境都必须延续，不得重新设计一双鞋，不得替换成相似鞋款，不得把产品改成其他登山鞋或跑鞋。镜头只能在这张首帧基础上做轻微推进、微摇、环境水雾和光影变化。'
+          : '',
         seedanceFirstFrameControl,
         productIdentityLock,
         isProductDetailEnding
