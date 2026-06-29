@@ -32,7 +32,8 @@ const DEFAULT_LANGUAGE_MODELS = [
 ]
 
 const DEFAULT_IMAGE_MODELS = [
-  { id: 'image2', name: 'Image2 产品还原', provider: 'toapis', available: true },
+  { id: 'image2-main', name: 'Image2 主模型', provider: 'openai_image', available: true },
+  { id: 'image2-toapis', name: 'Image2 ToAPIs', provider: 'toapis', available: true },
   { id: 'seedream-5.0', name: 'Seedream 5.0', provider: 'jimeng', available: true },
   { id: 'seedream-4.5', name: 'Seedream 4.5', provider: 'jimeng', available: true },
   { id: 'nanobanana', name: 'Nano Banana', provider: 'custom_image', available: false },
@@ -550,6 +551,17 @@ function providerForModel(modelId, models, fallback) {
   return models.find(item => item.id === modelId)?.provider || fallback
 }
 
+function normalizeImageModelId(modelId) {
+  return modelId === 'image2' ? 'image2-main' : (modelId || 'image2-main')
+}
+
+function referenceLimitForImageModel(modelId, models) {
+  const provider = providerForModel(modelId, models, 'openai_image')
+  if (provider === 'toapis') return IMAGE2_REFERENCE_LIMIT
+  if (provider === 'openai_image') return 4
+  return 8
+}
+
 function isUnsupportedModel(modelId, models) {
   const model = models.find(item => item.id === modelId)
   return model?.available === false
@@ -924,7 +936,7 @@ function normalizeDraft(rawDraft) {
     updatedAt: Number(rawDraft.updatedAt || 0),
     product: normalizeProductDraft(rawDraft.product),
     languageModel: typeof rawDraft.languageModel === 'string' ? rawDraft.languageModel : fallback.languageModel,
-    imageModel: typeof rawDraft.imageModel === 'string' ? rawDraft.imageModel : fallback.imageModel,
+    imageModel: typeof rawDraft.imageModel === 'string' ? normalizeImageModelId(rawDraft.imageModel) : fallback.imageModel,
     videoModel,
     videoResolution: savedResolution,
     aspectRatio: ASPECT_OPTIONS.includes(rawDraft.aspectRatio) ? rawDraft.aspectRatio : fallback.aspectRatio,
@@ -1969,9 +1981,11 @@ export default function BatchVideoWorkbenchPage() {
     startLoading('product-detail-sheet')
     setNotice(null)
     try {
+      const selectedImageModel = normalizeImageModelId(imageModel)
+      const imageReferenceLimit = referenceLimitForImageModel(selectedImageModel, imageModels)
       const plan = await api.post('/api/batch-video/product-reconstruction', {
         product: productPayload,
-        image_model: 'image2',
+        image_model: selectedImageModel,
         aspect_ratio: '16:9',
       })
       if (plan.status !== 'ready') {
@@ -1981,21 +1995,22 @@ export default function BatchVideoWorkbenchPage() {
       const result = await api.post('/api/game/generate_image', {
         project_id: '',
         prompt: plan.prompt,
-        provider: plan.provider || 'toapis',
-        model: plan.image_model || 'image2',
+        provider: plan.provider || providerForModel(selectedImageModel, imageModels, 'openai_image'),
+        model: plan.image_model || selectedImageModel,
         aspect_ratio: '16:9',
         asset_type: 'product_detail_sheet',
-        reference_urls: (plan.reference_urls || product.imageUrls.map(item => item.url)).slice(0, IMAGE2_REFERENCE_LIMIT),
+        reference_urls: (plan.reference_urls || product.imageUrls.map(item => item.url)).slice(0, imageReferenceLimit),
         prompt_optimize_mode: 'standard',
         image_quality: '2K',
         output_format: 'png',
       })
       const imageUrl = readMediaUrl(result)
       if (!imageUrl) throw new Error('图片模型未返回产品详情表图片地址')
+      const selectedModelLabel = imageModels.find(item => item.id === selectedImageModel)?.name || selectedImageModel
       const version = makeVersionItem(imageUrl, {
         prompt: plan.prompt || '',
-        source: plan.image_model || 'image2',
-        label: `Image2 ${new Date().toLocaleTimeString()}`,
+        source: plan.image_model || selectedImageModel,
+        label: `${selectedModelLabel} ${new Date().toLocaleTimeString()}`,
       })
       setProduct(prev => ({
         ...prev,
@@ -2020,10 +2035,12 @@ export default function BatchVideoWorkbenchPage() {
     startLoading('product-poster')
     setNotice(null)
     try {
+      const selectedImageModel = normalizeImageModelId(imageModel)
+      const imageReferenceLimit = referenceLimitForImageModel(selectedImageModel, imageModels)
       const plan = await api.post('/api/batch-video/product-poster', {
         product: productPayload,
         selling_points: sellingPoints,
-        image_model: 'image2',
+        image_model: selectedImageModel,
         aspect_ratio: aspectRatio,
       })
       if (plan.status !== 'ready') {
@@ -2033,11 +2050,11 @@ export default function BatchVideoWorkbenchPage() {
       const result = await api.post('/api/game/generate_image', {
         project_id: '',
         prompt: plan.prompt,
-        provider: plan.provider || 'toapis',
-        model: plan.image_model || 'image2',
+        provider: plan.provider || providerForModel(selectedImageModel, imageModels, 'openai_image'),
+        model: plan.image_model || selectedImageModel,
         aspect_ratio: plan.aspect_ratio || aspectRatio,
         asset_type: 'product_final_poster',
-        reference_urls: (plan.reference_urls || productReferences).slice(0, IMAGE2_REFERENCE_LIMIT),
+        reference_urls: (plan.reference_urls || productReferences).slice(0, imageReferenceLimit),
         prompt_optimize_mode: 'standard',
         image_quality: '2K',
         output_format: 'png',
@@ -2046,7 +2063,7 @@ export default function BatchVideoWorkbenchPage() {
       if (!imageUrl) throw new Error('图片模型未返回产品海报图片地址')
       const version = makeVersionItem(imageUrl, {
         prompt: plan.prompt || '',
-        source: plan.image_model || 'image2',
+        source: plan.image_model || selectedImageModel,
         label: `收尾海报 ${new Date().toLocaleTimeString()}`,
       })
       setProductPosterUrl(imageUrl)

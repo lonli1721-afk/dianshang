@@ -23,8 +23,8 @@ OPENAI_MODELS = [
 
 OPENAI_IMAGE_MODELS = [
     {
-        "id": "gpt-image-2",
-        "name": "GPT Image 2",
+        "id": "image2-main",
+        "name": "Image2 主模型",
         "provider": "openai_image",
         "supports_ref_images": True,
         "max_ref_images": 4,
@@ -250,7 +250,7 @@ class OpenAIService:
 
     def _image_model(self, model: str) -> str:
         normalized = (model or "").strip()
-        if not normalized or normalized == "image2":
+        if not normalized or normalized in {"image2", "image2-main"}:
             return "gpt-image-2"
         return normalized
 

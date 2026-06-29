@@ -18,8 +18,8 @@ DEFAULT_BASE_URL = "https://toapis.com"
 SUPPORTED_ASPECT_RATIOS = {"16:9", "9:16", "3:2", "2:3", "1:1"}
 TOAPIS_IMAGE_MODELS = [
     {
-        "id": "image2",
-        "name": "Image2",
+        "id": "image2-toapis",
+        "name": "Image2 ToAPIs",
         "provider": "toapis",
         "supports_ref_images": True,
         "max_ref_images": 16,
@@ -65,7 +65,7 @@ def _normalize_aspect_ratio(value: str) -> str:
 
 def _normalize_image_model(value: str) -> str:
     raw = (value or "").strip()
-    if not raw or raw == "image2":
+    if not raw or raw in {"image2", "image2-toapis"}:
         return "gpt-image-2"
     return raw
 

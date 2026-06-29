@@ -114,8 +114,15 @@ IMAGE_MODELS = [
         "available": True,
     },
     {
-        "id": "image2",
-        "name": "Image2 产品还原",
+        "id": "image2-main",
+        "name": "Image2 主模型",
+        "provider": "openai_image",
+        "available": True,
+        "note": "使用后台 OpenAI API Key（代理中转）调用 GPT Image 2 生成完整产品详情表",
+    },
+    {
+        "id": "image2-toapis",
+        "name": "Image2 ToAPIs",
         "provider": "toapis",
         "available": True,
         "note": "使用 ToAPIs API 调用 Image2/GPT Image 2 生成完整产品详情表",
@@ -219,14 +226,14 @@ class StoryboardPlanRequest(BaseModel):
 
 class ProductReconstructionRequest(BaseModel):
     product: ProductInput = Field(default_factory=ProductInput)
-    image_model: str = "image2"
+    image_model: str = "image2-main"
     aspect_ratio: str = "16:9"
 
 
 class ProductPosterRequest(BaseModel):
     product: ProductInput = Field(default_factory=ProductInput)
     selling_points: list[SellingPoint] = Field(default_factory=list)
-    image_model: str = "image2"
+    image_model: str = "image2-main"
     aspect_ratio: str = "9:16"
 
 
@@ -2379,12 +2386,13 @@ async def save_product_memory(req: ProductMemoryRequest, request: Request):
 @router.post("/product-reconstruction")
 async def build_product_reconstruction(req: ProductReconstructionRequest):
     reference_urls = [url for url in dict.fromkeys(req.product.image_urls or []) if str(url or "").strip()]
-    image_provider = _model_provider(req.image_model or "image2", IMAGE_MODELS, "jimeng")
+    requested_image_model = req.image_model or "image2-main"
+    image_provider = _model_provider(requested_image_model, IMAGE_MODELS, "openai_image")
     reference_limit = 16 if image_provider == "toapis" else (4 if image_provider == "openai_image" else 8)
     if not reference_urls:
         return {
             "status": "needs_reference",
-            "image_model": req.image_model,
+            "image_model": requested_image_model,
             "provider": image_provider,
             "prompt": "",
             "reference_urls": [],
@@ -2392,7 +2400,7 @@ async def build_product_reconstruction(req: ProductReconstructionRequest):
         }
     return {
         "status": "ready",
-        "image_model": req.image_model or "image2",
+        "image_model": requested_image_model,
         "provider": image_provider,
         "aspect_ratio": req.aspect_ratio or "16:9",
         "prompt": _product_reconstruction_prompt(req.product),
@@ -2412,12 +2420,13 @@ async def build_product_reconstruction(req: ProductReconstructionRequest):
 @router.post("/product-poster")
 async def build_product_poster(req: ProductPosterRequest):
     product_refs = [url for url in [req.product.detail_sheet_url, *(req.product.image_urls or [])] if str(url or "").strip()]
-    image_provider = _model_provider(req.image_model or "image2", IMAGE_MODELS, "toapis")
+    requested_image_model = req.image_model or "image2-main"
+    image_provider = _model_provider(requested_image_model, IMAGE_MODELS, "openai_image")
     reference_limit = 16 if image_provider == "toapis" else (4 if image_provider == "openai_image" else 8)
     if not product_refs:
         return {
             "status": "needs_reference",
-            "image_model": req.image_model,
+            "image_model": requested_image_model,
             "provider": image_provider,
             "prompt": "",
             "reference_urls": [],
@@ -2425,7 +2434,7 @@ async def build_product_poster(req: ProductPosterRequest):
         }
     return {
         "status": "ready",
-        "image_model": req.image_model or "image2",
+        "image_model": requested_image_model,
         "provider": image_provider,
         "aspect_ratio": req.aspect_ratio or "9:16",
         "prompt": _product_poster_prompt(req.product, req.selling_points or []),
