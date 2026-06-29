@@ -34,6 +34,7 @@ const DEFAULT_LANGUAGE_MODELS = [
 const DEFAULT_IMAGE_MODELS = [
   { id: 'image2-main', name: 'Image2 主模型', provider: 'openai_image', available: true },
   { id: 'image2-toapis', name: 'Image2 ToAPIs', provider: 'toapis', available: true },
+  { id: 'image2-vip', name: 'Image2 VIP（ToAPIs）', provider: 'toapis', available: true },
   { id: 'seedream-5.0', name: 'Seedream 5.0', provider: 'jimeng', available: true },
   { id: 'seedream-4.5', name: 'Seedream 4.5', provider: 'jimeng', available: true },
   { id: 'nanobanana', name: 'Nano Banana', provider: 'custom_image', available: false },

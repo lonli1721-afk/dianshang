@@ -128,6 +128,13 @@ IMAGE_MODELS = [
         "note": "使用 ToAPIs API 调用 Image2/GPT Image 2 生成完整产品详情表",
     },
     {
+        "id": "image2-vip",
+        "name": "Image2 VIP（ToAPIs）",
+        "provider": "toapis",
+        "available": True,
+        "note": "使用 ToAPIs gpt-image-2-vip 生成完整产品详情表，支持更多宽高比",
+    },
+    {
         "id": "nanobanana",
         "name": "Nano Banana",
         "provider": "custom_image",

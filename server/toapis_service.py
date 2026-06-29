@@ -27,6 +27,16 @@ TOAPIS_IMAGE_MODELS = [
         "default_quality": "2K",
         "note": "通过 ToAPIs 官方渠道调用 GPT Image 2 / Image2。",
     },
+    {
+        "id": "image2-vip",
+        "name": "Image2 VIP（ToAPIs）",
+        "provider": "toapis",
+        "supports_ref_images": True,
+        "max_ref_images": 16,
+        "supported_qualities": ["1K", "2K", "4K"],
+        "default_quality": "2K",
+        "note": "通过 ToAPIs 调用 gpt-image-2-vip，支持全部常用宽高比。",
+    },
 ]
 TOAPIS_IMAGE_MAX_REFERENCE_IMAGES = 16
 
@@ -67,7 +77,14 @@ def _normalize_image_model(value: str) -> str:
     raw = (value or "").strip()
     if not raw or raw in {"image2", "image2-toapis"}:
         return "gpt-image-2"
+    if raw == "image2-vip":
+        return "gpt-image-2-vip"
     return raw
+
+
+def _normalize_image_quality(value: str) -> str:
+    raw = (value or "").strip().upper()
+    return {"1K": "low", "2K": "medium", "4K": "high"}.get(raw, "medium")
 
 
 def _normalize_image_size(width: int = 1024, height: int = 1024, aspect_ratio: str = "") -> str:
@@ -463,6 +480,7 @@ class ToapisVideoService:
             "prompt": prompt,
             "size": size,
             "resolution": _normalize_image_resolution(image_quality, size),
+            "quality": _normalize_image_quality(image_quality),
             "n": 1,
             "response_format": "url",
         }
