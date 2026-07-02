@@ -7,6 +7,7 @@ import {
   Clapperboard,
   Copy,
   FileVideo,
+  FolderOpen,
   Image as ImageIcon,
   ListChecks,
   Mic2,
@@ -58,6 +59,12 @@ const CLIP_PLAYBACK_RATE_OPTIONS = [
   { value: 1.5, label: '1.5x' },
   { value: 2, label: '2x 快放' },
 ]
+const DEFAULT_AUTO_CLIP_DURATION = 6.4
+const DEFAULT_AUTO_CLIP_PLAYBACK_RATE = 1.25
+const AUTO_BATCH_CONCURRENCY = 3
+const AUTO_WORK_MIN_SCENES = 3
+const AUTO_WORK_MAX_SCENES = 4
+const DEFAULT_LOCAL_RECOVERY_FOLDER = 'C:\\Users\\Administrator\\Desktop\\素材\\ai素材'
 const DEFAULT_STORYBOARD_SCENE_COUNT = 6
 const VEO_STORYBOARD_SCENE_COUNT = 4
 const VEO_STORYBOARD_DURATION = 8
@@ -271,7 +278,10 @@ function createDefaultDraft() {
     storyboardReferences: [],
     productionMatrix,
     scenes: [],
+    batchSceneArchive: [],
     batchResult: null,
+    autoWorks: [],
+    autoWorkArchive: [],
     finalVideo: null,
     finalClips: [],
     ttsVoiceType: '',
@@ -306,7 +316,10 @@ function buildWorkbenchDraftSnapshot({
   storyboardReferences,
   productionMatrix,
   scenes,
+  batchSceneArchive,
   batchResult,
+  autoWorks,
+  autoWorkArchive,
   finalVideo,
   finalClips,
   ttsVoiceType,
@@ -339,7 +352,10 @@ function buildWorkbenchDraftSnapshot({
     storyboardReferences,
     productionMatrix,
     scenes,
+    batchSceneArchive,
     batchResult,
+    autoWorks,
+    autoWorkArchive,
     finalVideo,
     finalClips,
     ttsVoiceType,
@@ -522,6 +538,12 @@ function clipVideoElementId(clipId) {
   return `clip-video-${String(clipId || '').replace(/[^A-Za-z0-9_-]/g, '_')}`
 }
 
+function cacheBustedAssetUrl(url, token) {
+  const resolvedUrl = assetUrl(url)
+  if (!resolvedUrl || !token) return resolvedUrl
+  return `${resolvedUrl}${resolvedUrl.includes('?') ? '&' : '?'}v=${encodeURIComponent(token)}`
+}
+
 function clipSliderMax(clip, previewState = {}) {
   const duration = Number(previewState.duration || 0)
   const startTime = Number(clip?.startTime || 0)
@@ -543,13 +565,13 @@ function createFinalClipFromScene(scene, index = 0, version = null) {
   const voiceoverText = scene.voiceover_text || scene.voiceoverText || scene.voiceover || buildDefaultVoiceover(scene, index)
   return {
     id: `clip_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    sceneId: scene.id || `scene_${index}`,
+    sceneId: scene.sourceSceneId || scene.id || `scene_${index}`,
     title: scene.title || `分镜 ${index + 1}`,
     videoUrl: selectedVersion.url,
-    sourceLabel: selectedVersion.label || selectedVersion.source || '',
+    sourceLabel: selectedVersion.label || selectedVersion.source || scene.candidateSourceLabel || '',
     startTime: 0,
-    endTime: '',
-    playbackRate: 1,
+    endTime: DEFAULT_AUTO_CLIP_DURATION,
+    playbackRate: DEFAULT_AUTO_CLIP_PLAYBACK_RATE,
     voiceoverText,
     subtitle: voiceoverText,
   }
@@ -588,6 +610,263 @@ function buildDefaultFinalClips(scenes) {
   return (Array.isArray(scenes) ? scenes : [])
     .map((scene, index) => createFinalClipFromScene(scene, index))
     .filter(Boolean)
+}
+
+function mergeSceneRecords(existingScene, nextScene, index = 0) {
+  const existing = existingScene || {}
+  const next = nextScene || {}
+  const storyboardUrl = next.storyboard_image_url || next.storyboardImageUrl || existing.storyboard_image_url || existing.storyboardImageUrl || ''
+  const videoUrl = next.video_url || next.videoUrl || existing.video_url || existing.videoUrl || ''
+  return normalizeScene({
+    ...existing,
+    ...next,
+    storyboard_image_url: storyboardUrl,
+    video_url: videoUrl,
+    status: videoUrl ? 'completed' : (next.status || existing.status || 'draft'),
+    storyboardImageHistory: mergeVersionHistory(
+      existing.storyboardImageHistory || existing.storyboard_image_history || next.storyboardImageHistory || next.storyboard_image_history,
+      makeVersionItem(storyboardUrl),
+    ),
+    videoHistory: mergeVersionHistory(
+      existing.videoHistory || existing.video_history || next.videoHistory || next.video_history,
+      makeVersionItem(videoUrl),
+    ),
+  }, index)
+}
+
+function productDetailSceneScore(scene) {
+  if (!scene) return 0
+  return (
+    (scene.video_url || scene.videoUrl ? 8 : 0)
+    + (scene.storyboard_image_url || scene.storyboardImageUrl ? 4 : 0)
+    + (scene.taskId ? 2 : 0)
+    + (scene.status === 'completed' ? 1 : 0)
+  )
+}
+
+function collectRestorableScenes(...sceneSources) {
+  const sceneMap = new Map()
+  let detailScene = null
+  sceneSources.forEach(source => {
+    ;(Array.isArray(source) ? source : []).forEach((scene, index) => {
+      if (!scene) return
+      const sceneId = scene.id || `scene_${sceneMap.size}_${index}`
+      const isProductDetail = scene.referenceMode === 'product_detail' || scene.reference_mode === 'product_detail'
+      if (isProductDetail) {
+        const mergedDetail = mergeSceneRecords(detailScene, { ...scene, id: detailScene?.id || sceneId }, sceneMap.size)
+        detailScene = productDetailSceneScore(mergedDetail) >= productDetailSceneScore(detailScene)
+          ? mergedDetail
+          : detailScene
+        return
+      }
+      const existing = sceneMap.get(sceneId)
+      sceneMap.set(sceneId, mergeSceneRecords(existing, { ...scene, id: sceneId }, sceneMap.size))
+    })
+  })
+  const restoredScenes = Array.from(sceneMap.values())
+  if (detailScene) restoredScenes.push(normalizeScene(detailScene, restoredScenes.length))
+  return restoredScenes
+}
+
+function collectScenesFromAutoWorks(sourceAutoWorks) {
+  return (Array.isArray(sourceAutoWorks) ? sourceAutoWorks : []).flatMap(work => (
+    Array.isArray(work?.scenes) ? work.scenes : []
+  ))
+}
+
+function mergeAutoWorkRecords(existingWork, nextWork, index = 0) {
+  const existing = existingWork || {}
+  const next = nextWork || {}
+  return normalizeAutoWork({
+    ...existing,
+    ...next,
+    scenes: collectRestorableScenes(existing.scenes || [], next.scenes || []),
+    sceneIds: Array.isArray(next.sceneIds) && next.sceneIds.length ? next.sceneIds : existing.sceneIds,
+    finalClips: Array.isArray(next.finalClips) && next.finalClips.length ? next.finalClips : existing.finalClips,
+    finalVideo: next.finalVideo || existing.finalVideo || null,
+    updatedAt: Math.max(Number(existing.updatedAt || 0), Number(next.updatedAt || 0), Date.now()),
+  }, index)
+}
+
+function collectRestorableAutoWorks(...workSources) {
+  const workMap = new Map()
+  workSources.forEach(source => {
+    ;(Array.isArray(source) ? source : []).forEach((work, index) => {
+      if (!work) return
+      const workId = String(work.id || `auto_work_${workMap.size}_${index}`)
+      const existing = workMap.get(workId)
+      workMap.set(workId, mergeAutoWorkRecords(existing, { ...work, id: workId }, workMap.size))
+    })
+  })
+  return Array.from(workMap.values())
+}
+
+function sceneArchiveSignature(sourceScenes) {
+  return (Array.isArray(sourceScenes) ? sourceScenes : [])
+    .map(scene => [
+      scene?.id || '',
+      scene?.referenceMode || scene?.reference_mode || '',
+      scene?.storyboard_image_url || scene?.storyboardImageUrl || '',
+      scene?.video_url || scene?.videoUrl || '',
+      scene?.taskId || '',
+      scene?.status || '',
+    ].join(':'))
+    .join('|')
+}
+
+function autoWorkArchiveSignature(sourceWorks) {
+  return (Array.isArray(sourceWorks) ? sourceWorks : [])
+    .map(work => [
+      work?.id || '',
+      work?.status || '',
+      work?.finalVideo?.video_url || '',
+      sceneArchiveSignature(work?.scenes || []),
+    ].join(':'))
+    .join('|')
+}
+
+function buildReviewableSceneCandidates(sourceScenes, sourceAutoWorks = []) {
+  const candidates = []
+  const seen = new Set()
+  const pushSceneVersions = (scene, sceneIndex, sourceLabel = '') => {
+    if (!scene) return
+    videoVersionOptionsForScene(scene).forEach((version, versionIndex) => {
+      if (!version?.url) return
+      const sceneId = scene.id || `scene_${sceneIndex}`
+      const key = `${sceneId}::${version.url}`
+      if (seen.has(key)) return
+      seen.add(key)
+      candidates.push({
+        ...scene,
+        id: `${sceneId}__candidate_${versionIndex}_${candidates.length}`,
+        sourceSceneId: sceneId,
+        candidateVideoUrl: version.url,
+        candidateVersion: version,
+        candidateSourceLabel: version.label || version.source || sourceLabel,
+        candidateIndex: candidates.length,
+        video_url: version.url,
+      })
+    })
+  }
+
+  ;(Array.isArray(sourceScenes) ? sourceScenes : []).forEach((scene, index) => {
+    pushSceneVersions(scene, index, '当前分镜')
+  })
+  ;(Array.isArray(sourceAutoWorks) ? sourceAutoWorks : []).forEach((work, workIndex) => {
+    const workScenes = Array.isArray(work?.scenes) ? work.scenes : []
+    workScenes.forEach((scene, sceneIndex) => {
+      pushSceneVersions(scene, sceneIndex, work?.title || `批量成品 ${workIndex + 1}`)
+    })
+  })
+  return candidates
+}
+
+function buildSegmentsFromClips(clips, sourceScenes) {
+  const sceneList = Array.isArray(sourceScenes) ? sourceScenes : []
+  return (Array.isArray(clips) ? clips : [])
+    .map((clip, index) => {
+      const scene = sceneList.find(item => item.id === clip.sceneId) || sceneList[index] || {}
+      const hasClipVoiceover = Object.prototype.hasOwnProperty.call(clip, 'voiceoverText')
+        || Object.prototype.hasOwnProperty.call(clip, 'subtitle')
+      const voiceoverText = hasClipVoiceover
+        ? String(clip.voiceoverText ?? clip.subtitle ?? '').trim()
+        : String(scene.voiceover_text || '').trim()
+      return {
+        scene_id: clip.sceneId || scene.id || `clip_${index + 1}`,
+        title: clip.title || scene.title || `片段 ${index + 1}`,
+        reference_mode: scene.referenceMode || scene.reference_mode || '',
+        video_url: clip.videoUrl,
+        start_time: clip.startTime === '' ? 0 : Number(clip.startTime || 0),
+        end_time: clip.endTime === '' ? null : Number(clip.endTime),
+        playback_rate: normalizeClipPlaybackRate(clip.playbackRate),
+        subtitle: voiceoverText,
+        voiceover_text: voiceoverText,
+      }
+    })
+    .filter(segment => segment.video_url)
+}
+
+function splitAutoWorkSceneGroups(sourceScenes) {
+  const pending = (Array.isArray(sourceScenes) ? sourceScenes : [])
+    .filter(scene => scene && scene.referenceMode !== 'product_detail' && scene.reference_mode !== 'product_detail')
+  return splitAutoWorkGroups(pending)
+}
+
+function splitAutoWorkClipGroups(sourceClips) {
+  const pending = (Array.isArray(sourceClips) ? sourceClips : [])
+    .filter(clip => clip && clip.videoUrl)
+  return splitAutoWorkGroups(pending)
+}
+
+function splitAutoWorkGroups(pending) {
+  const groups = []
+  let index = 0
+  while (index < pending.length) {
+    const remaining = pending.length - index
+    if (remaining < AUTO_WORK_MIN_SCENES) {
+      break
+    }
+    let size = AUTO_WORK_MAX_SCENES
+    if (remaining <= AUTO_WORK_MAX_SCENES) {
+      size = remaining
+    } else if (remaining === 5) {
+      size = AUTO_WORK_MAX_SCENES
+    } else if (remaining % AUTO_WORK_MAX_SCENES === 1 || remaining % AUTO_WORK_MAX_SCENES === 2) {
+      size = AUTO_WORK_MIN_SCENES
+    }
+    groups.push(pending.slice(index, index + size))
+    index += size
+  }
+  return groups.filter(group => group.length)
+}
+
+function normalizeAutoWork(work, index = 0) {
+  if (!work || typeof work !== 'object') return null
+  const scenes = Array.isArray(work.scenes)
+    ? work.scenes.map((scene, sceneIndex) => normalizeScene(scene || {}, sceneIndex))
+    : []
+  const sceneIds = Array.isArray(work.sceneIds) && work.sceneIds.length
+    ? work.sceneIds.map(id => String(id || '')).filter(Boolean)
+    : scenes.map(scene => scene.id).filter(Boolean)
+  const finalClips = Array.isArray(work.finalClips)
+    ? work.finalClips.map((clip, clipIndex) => normalizeFinalClip(clip || {}, clipIndex, scenes)).filter(Boolean)
+    : []
+  return {
+    id: String(work.id || `auto_work_${Date.now()}_${index}`),
+    title: String(work.title || `成品 ${index + 1}`),
+    strategy: String(work.strategy || ''),
+    status: String(work.status || 'queued'),
+    error: String(work.error || ''),
+    scenes,
+    sceneIds,
+    finalClips,
+    finalVideo: work.finalVideo && typeof work.finalVideo === 'object' ? work.finalVideo : null,
+    createdAt: Number(work.createdAt || Date.now()),
+    updatedAt: Number(work.updatedAt || work.createdAt || Date.now()),
+  }
+}
+
+function autoWorkStatusText(status) {
+  const key = String(status || '')
+  if (key === 'completed') return '已成片'
+  if (key === 'composing') return '合成中'
+  if (key === 'generating') return '素材生成中'
+  if (key === 'submitted') return '等待视频完成'
+  if (key === 'failed') return '失败'
+  if (key === 'ready') return '可合成'
+  return '排队中'
+}
+
+async function runWithConcurrency(items, limit, runner) {
+  const queue = Array.isArray(items) ? [...items] : []
+  const workerCount = Math.max(1, Math.min(Number(limit) || 1, queue.length || 1))
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (queue.length) {
+      const item = queue.shift()
+      await runner(item)
+    }
+  })
+  await Promise.all(workers)
 }
 
 function modelLabel(model) {
@@ -982,6 +1261,18 @@ function normalizeDraft(rawDraft) {
   const normalizedFinalClips = Array.isArray(rawDraft.finalClips)
     ? rawDraft.finalClips.map((clip, index) => normalizeFinalClip(clip || {}, index, normalizedScenes)).filter(Boolean)
     : []
+  const normalizedAutoWorks = Array.isArray(rawDraft.autoWorks)
+    ? rawDraft.autoWorks.map((work, index) => normalizeAutoWork(work || {}, index)).filter(Boolean)
+    : []
+  const normalizedAutoWorkArchive = collectRestorableAutoWorks(
+    Array.isArray(rawDraft.autoWorkArchive) ? rawDraft.autoWorkArchive : [],
+    normalizedAutoWorks,
+  )
+  const normalizedBatchSceneArchive = collectRestorableScenes(
+    Array.isArray(rawDraft.batchSceneArchive) ? rawDraft.batchSceneArchive : [],
+    normalizedScenes,
+    collectScenesFromAutoWorks(normalizedAutoWorkArchive),
+  )
   const rawTtsVoiceType = typeof rawDraft.ttsVoiceType === 'string' ? rawDraft.ttsVoiceType : fallback.ttsVoiceType
   const ttsVoiceType = TTS_VOICE_OPTIONS.some(item => item.id === rawTtsVoiceType) ? rawTtsVoiceType : 'custom'
   const ttsSpeedRatio = Number(rawDraft.ttsSpeedRatio)
@@ -1018,7 +1309,10 @@ function normalizeDraft(rawDraft) {
       : [],
     productionMatrix: normalizeProductionMatrix(rawDraft.productionMatrix),
     scenes: normalizedScenes,
+    batchSceneArchive: normalizedBatchSceneArchive,
     batchResult: rawDraft.batchResult && typeof rawDraft.batchResult === 'object' ? rawDraft.batchResult : null,
+    autoWorks: normalizedAutoWorks,
+    autoWorkArchive: normalizedAutoWorkArchive,
     finalVideo: rawDraft.finalVideo && typeof rawDraft.finalVideo === 'object' ? rawDraft.finalVideo : null,
     finalClips: normalizedFinalClips,
     ttsVoiceType,
@@ -1242,9 +1536,19 @@ export default function BatchVideoWorkbenchPage() {
   const [storyboardReferences, setStoryboardReferences] = useState(() => initialDraft.storyboardReferences)
   const [productionMatrix, setProductionMatrix] = useState(() => initialDraft.productionMatrix)
   const [scenes, setScenes] = useState(() => initialDraft.scenes)
+  const [batchSceneArchive, setBatchSceneArchive] = useState(() => initialDraft.batchSceneArchive || [])
   const [batchResult, setBatchResult] = useState(() => initialDraft.batchResult)
+  const [autoWorks, setAutoWorks] = useState(() => initialDraft.autoWorks || [])
+  const [autoWorkArchive, setAutoWorkArchive] = useState(() => initialDraft.autoWorkArchive || initialDraft.autoWorks || [])
   const [finalVideo, setFinalVideo] = useState(() => initialDraft.finalVideo || null)
+  const [finalVideoRefreshToken, setFinalVideoRefreshToken] = useState(() => (
+    initialDraft.finalVideo?.generated_at
+    || initialDraft.finalVideo?.compose_generated_at
+    || initialDraft.finalVideo?.video_url
+    || ''
+  ))
   const [finalClips, setFinalClips] = useState(() => initialDraft.finalClips || [])
+  const [autoClipBuildPending, setAutoClipBuildPending] = useState(false)
   const [clipPreviewState, setClipPreviewState] = useState({})
   const [ttsVoiceType, setTtsVoiceType] = useState(() => initialDraft.ttsVoiceType || '')
   const [ttsCustomVoiceType, setTtsCustomVoiceType] = useState(() => initialDraft.ttsCustomVoiceType || '')
@@ -1263,6 +1567,7 @@ export default function BatchVideoWorkbenchPage() {
   const [productMemoryReadyTick, setProductMemoryReadyTick] = useState(0)
   const [notice, setNotice] = useState(null)
   const [loadingTasks, setLoadingTasks] = useState({})
+  const [localRecoveryFolder, setLocalRecoveryFolder] = useState(DEFAULT_LOCAL_RECOVERY_FOLDER)
   const [, setProgressTick] = useState(0)
 
   const productPayload = useMemo(() => buildProductPayload(product), [product])
@@ -1301,6 +1606,7 @@ export default function BatchVideoWorkbenchPage() {
   const storyboardRegenerateIndexRef = useRef(0)
   const draftHydratedRef = useRef(false)
   const draftSaveTimerRef = useRef(null)
+  const autoWorkComposingRef = useRef(new Set())
   const productMemoryFetchRef = useRef({ nameKey: '', requestId: 0 })
   const productMemorySaveTimerRef = useRef(null)
   const productMemoryLastSavedRef = useRef('')
@@ -1391,7 +1697,10 @@ export default function BatchVideoWorkbenchPage() {
     setStoryboardReferences(nextDraft.storyboardReferences)
     setProductionMatrix(nextDraft.productionMatrix)
     setScenes(nextDraft.scenes)
+    setBatchSceneArchive(nextDraft.batchSceneArchive)
     setBatchResult(nextDraft.batchResult)
+    setAutoWorks(nextDraft.autoWorks)
+    setAutoWorkArchive(nextDraft.autoWorkArchive)
     setFinalVideo(nextDraft.finalVideo)
     setFinalClips(nextDraft.finalClips)
     setTtsVoiceType(nextDraft.ttsVoiceType)
@@ -1410,12 +1719,36 @@ export default function BatchVideoWorkbenchPage() {
 
   const updateScene = useCallback((sceneId, patch) => {
     setScenes(prev => prev.map(scene => (scene.id === sceneId ? { ...scene, ...patch } : scene)))
+    setBatchSceneArchive(prev => prev.map(scene => (scene.id === sceneId ? mergeSceneRecords(scene, { ...scene, ...patch }) : scene)))
+    setAutoWorkArchive(prev => prev.map(work => ({
+      ...work,
+      scenes: (work.scenes || []).map(scene => (scene.id === sceneId ? mergeSceneRecords(scene, { ...scene, ...patch }) : scene)),
+    })))
+    setAutoWorks(prev => prev.map(work => ({
+      ...work,
+      scenes: (work.scenes || []).map(scene => (scene.id === sceneId ? mergeSceneRecords(scene, { ...scene, ...patch }) : scene)),
+    })))
   }, [])
 
   const updateSceneWith = useCallback((sceneId, updater) => {
     setScenes(prev => prev.map(scene => (
       scene.id === sceneId ? { ...scene, ...updater(scene) } : scene
     )))
+    setBatchSceneArchive(prev => prev.map(scene => (
+      scene.id === sceneId ? mergeSceneRecords(scene, { ...scene, ...updater(scene) }) : scene
+    )))
+    setAutoWorkArchive(prev => prev.map(work => ({
+      ...work,
+      scenes: (work.scenes || []).map(scene => (
+        scene.id === sceneId ? mergeSceneRecords(scene, { ...scene, ...updater(scene) }) : scene
+      )),
+    })))
+    setAutoWorks(prev => prev.map(work => ({
+      ...work,
+      scenes: (work.scenes || []).map(scene => (
+        scene.id === sceneId ? mergeSceneRecords(scene, { ...scene, ...updater(scene) }) : scene
+      )),
+    })))
   }, [])
 
   const selectDetailSheetVersion = useCallback((version) => {
@@ -1462,9 +1795,41 @@ export default function BatchVideoWorkbenchPage() {
       : { type: 'warning', text: '当前还没有可用视频，先生成或选择视频版本。' })
   }, [scenes])
 
+  const appendAllReviewableScenesToFinalClips = useCallback(() => {
+    const candidates = buildReviewableSceneCandidates(scenes, autoWorks)
+    const clips = candidates
+      .map((scene, index) => createFinalClipFromScene(scene, index, scene.candidateVersion))
+      .filter(Boolean)
+    if (!clips.length) {
+      setNotice({ type: 'warning', text: '当前还没有可加入选片审片的视频，先生成分镜视频。' })
+      return
+    }
+    const existingKeys = new Set(
+      finalClips
+        .filter(clip => clip.videoUrl)
+        .map(clip => `${clip.sceneId || ''}::${clip.videoUrl}`),
+    )
+    const nextClips = clips.filter(clip => {
+      const key = `${clip.sceneId || ''}::${clip.videoUrl}`
+      if (existingKeys.has(key)) return false
+      existingKeys.add(key)
+      return true
+    })
+    if (!nextClips.length) {
+      setNotice({ type: 'warning', text: '所有已生成分镜都已经在选片审片里了。' })
+      return
+    }
+    setFinalClips(prev => [...prev, ...nextClips])
+    setNotice({
+      type: 'success',
+      text: `已把 ${nextClips.length} 个分镜加入选片审片，可继续拖动开始/结束截取可用画面。`,
+    })
+  }, [autoWorks, finalClips, scenes])
+
   const appendFinalClipFromScene = useCallback((scene, version = null) => {
-    const index = scenes.findIndex(item => item.id === scene.id)
-    const clip = createFinalClipFromScene(scene, Math.max(0, index), version)
+    const sourceSceneId = scene.sourceSceneId || scene.id
+    const index = scenes.findIndex(item => item.id === sourceSceneId)
+    const clip = createFinalClipFromScene(scene, Math.max(0, index), version || scene.candidateVersion)
     if (!clip) {
       setNotice({ type: 'warning', text: '这个分镜还没有可用视频，先生成或选择一个视频版本。' })
       return
@@ -1863,6 +2228,21 @@ export default function BatchVideoWorkbenchPage() {
   }, [duration, selectedVideoModel, veoStoryboardMode])
 
   useEffect(() => {
+    const nextWorks = collectRestorableAutoWorks(autoWorkArchive, autoWorks)
+    if (autoWorkArchiveSignature(nextWorks) !== autoWorkArchiveSignature(autoWorkArchive)) {
+      setAutoWorkArchive(nextWorks)
+    }
+    const nextScenes = collectRestorableScenes(
+      batchSceneArchive,
+      scenes,
+      collectScenesFromAutoWorks(nextWorks),
+    )
+    if (sceneArchiveSignature(nextScenes) !== sceneArchiveSignature(batchSceneArchive)) {
+      setBatchSceneArchive(nextScenes)
+    }
+  }, [autoWorkArchive, autoWorks, batchSceneArchive, scenes])
+
+  useEffect(() => {
     if (!hasProcessingVideo) return undefined
     const timer = window.setInterval(() => setProgressTick(tick => tick + 1), 1000)
     return () => window.clearInterval(timer)
@@ -1878,6 +2258,75 @@ export default function BatchVideoWorkbenchPage() {
       }
     })
   }, [registerSceneVideoPolling, scenes, updateScene])
+
+  useEffect(() => {
+    if (!autoWorks.length || !productPosterUrl) return
+    autoWorks.forEach(work => {
+      if (!work || work.status === 'completed' || work.status === 'failed') return
+      const workScenes = getCurrentScenesForWork(work)
+      const detailScene = workScenes.find(scene => scene.referenceMode === 'product_detail' || scene.reference_mode === 'product_detail')
+      const readyAdScenes = workScenes.filter(scene => (
+        scene.video_url
+        && scene.referenceMode !== 'product_detail'
+        && scene.reference_mode !== 'product_detail'
+      ))
+      if (readyAdScenes.length < AUTO_WORK_MIN_SCENES) return
+      if (detailScene && !detailScene.video_url && detailScene.status !== 'failed') return
+      const readyScenes = workScenes.filter(scene => (
+        scene.video_url
+        && (scene.referenceMode !== 'product_detail' || readyAdScenes.length >= AUTO_WORK_MIN_SCENES)
+      ))
+      void composeAutoWork(work, readyScenes)
+    })
+  }, [autoWorks, productPosterUrl, scenes])
+
+  useEffect(() => {
+    if (!autoWorks.length) return
+    setBatchResult(prev => {
+      if (!prev?.tasks?.length) return prev
+      const tasks = autoWorks.map(work => ({
+        id: work.id,
+        title: work.title,
+        status: work.finalVideo?.video_url ? 'completed' : work.status,
+        video_url: work.finalVideo?.video_url || '',
+      }))
+      const currentSignature = prev.tasks
+        .map(task => `${task.id}:${task.status}:${task.video_url || ''}`)
+        .join('|')
+      const nextSignature = tasks
+        .map(task => `${task.id}:${task.status}:${task.video_url || ''}`)
+        .join('|')
+      return currentSignature === nextSignature ? prev : { ...prev, tasks }
+    })
+  }, [autoWorks])
+
+  useEffect(() => {
+    if (!autoClipBuildPending) return
+    if (autoWorks.length) {
+      setAutoClipBuildPending(false)
+      return
+    }
+    const clips = buildDefaultFinalClips(scenes)
+    const hasPendingScenes = scenes.some(scene => !scene.video_url && (scene.taskId || isProcessingTaskStatus(scene.status)))
+    if (!clips.length) {
+      if (!hasPendingScenes) {
+        setAutoClipBuildPending(false)
+      }
+      return
+    }
+    const nextSignature = clips.map(clip => `${clip.sceneId}:${clip.videoUrl}`).join('|')
+    const currentSignature = finalClips.map(clip => `${clip.sceneId}:${clip.videoUrl}`).join('|')
+    if (nextSignature !== currentSignature) {
+      setFinalClips(clips)
+    }
+    if (!hasPendingScenes) {
+      setAutoClipBuildPending(false)
+      setNotice({
+        type: 'success',
+        text: `批量视频已回填到剪辑表，默认截取 0-${DEFAULT_AUTO_CLIP_DURATION}s，画面 ${DEFAULT_AUTO_CLIP_PLAYBACK_RATE}x。`,
+      })
+    }
+  }, [autoClipBuildPending, autoWorks.length, finalClips, scenes])
 
   useEffect(() => {
     const savedDraft = saveWorkbenchDraft(buildWorkbenchDraftSnapshot({
@@ -1897,7 +2346,10 @@ export default function BatchVideoWorkbenchPage() {
       storyboardReferences,
       productionMatrix,
       scenes,
+      batchSceneArchive,
       batchResult,
+      autoWorks,
+      autoWorkArchive,
       finalVideo,
       finalClips,
       ttsVoiceType,
@@ -1928,6 +2380,9 @@ export default function BatchVideoWorkbenchPage() {
     }
   }, [
     aspectRatio,
+    autoWorkArchive,
+    autoWorks,
+    batchSceneArchive,
     batchResult,
     bgmEnabled,
     bgmName,
@@ -2435,7 +2890,9 @@ export default function BatchVideoWorkbenchPage() {
       setNotice({ type: 'warning', text: '请先整理卖点，或在手动卖点里至少填写一条。' })
       return
     }
-    setScenes(prev => mode === 'append' ? [...prev, ...matrixScenes] : matrixScenes)
+    const nextSceneList = mode === 'append' ? [...scenes, ...matrixScenes] : matrixScenes
+    setScenes(nextSceneList)
+    setBatchSceneArchive(prev => collectRestorableScenes(mode === 'append' ? prev : [], nextSceneList))
     setBatchResult(null)
     setFinalVideo(null)
     if (mode !== 'append') setFinalClips([])
@@ -2453,11 +2910,221 @@ export default function BatchVideoWorkbenchPage() {
     const nextScene = buildProductDetailEndingScene(product, isVeoModel(videoModel) ? normalizeVeoAspectRatio(aspectRatio) : aspectRatio, requestedVideoDuration)
     setScenes(prev => {
       const withoutOld = prev.filter(scene => scene.referenceMode !== 'product_detail')
-      return [...withoutOld, nextScene]
+      const nextScenes = [...withoutOld, nextScene]
+      setBatchSceneArchive(archive => collectRestorableScenes(archive, nextScenes))
+      return nextScenes
     })
     setFinalVideo(null)
     setFinalClips([])
     setNotice({ type: 'success', text: '已在分镜最后追加产品细节收尾镜头：将直接用最终版产品还原图生成视频，不需要分镜图。' })
+  }
+
+  function buildAutoWorkDetailScene(workIndex = 0) {
+    const detailScene = buildProductDetailEndingScene(
+      product,
+      isVeoModel(videoModel) ? normalizeVeoAspectRatio(aspectRatio) : aspectRatio,
+      requestedVideoDuration,
+    )
+    return {
+      ...detailScene,
+      id: `auto_detail_${Date.now()}_${workIndex}_${Math.random().toString(36).slice(2, 7)}`,
+      title: `成品 ${workIndex + 1} 产品细节视频`,
+      shot_notes: `${detailScene.shot_notes || ''} 自动成片产品细节，可失败不阻塞海报收尾。`,
+    }
+  }
+
+  function buildAutoWorksFromScenes(sourceScenes, { includeDetail = true, preferredClips = [] } = {}) {
+    const groups = splitAutoWorkSceneGroups(sourceScenes)
+    return groups.map((group, workIndex) => {
+      const workId = `auto_work_${Date.now()}_${workIndex}_${Math.random().toString(36).slice(2, 7)}`
+      const detailScene = includeDetail && product.detailSheetUrl ? buildAutoWorkDetailScene(workIndex) : null
+      const workScenes = [...group, detailScene].filter(Boolean).map(scene => ({
+        ...scene,
+        autoWorkId: workId,
+      }))
+      const sceneIds = workScenes.map(scene => scene.id)
+      const workClips = preferredClips
+        .filter(clip => sceneIds.includes(clip.sceneId))
+        .map((clip, clipIndex) => normalizeFinalClip(clip, clipIndex, workScenes))
+        .filter(Boolean)
+      return normalizeAutoWork({
+        id: workId,
+        title: `成品 ${workIndex + 1}`,
+        strategy: groupScenes.map(scene => scene.selling_point || scene.title).filter(Boolean).join(' / '),
+        status: 'queued',
+        scenes: workScenes,
+        sceneIds,
+        finalClips: workClips,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }, workIndex)
+    })
+  }
+
+  function getCurrentScenesForWork(work) {
+    const sceneById = new Map(scenes.map(scene => [scene.id, scene]))
+    const ids = Array.isArray(work.sceneIds) && work.sceneIds.length
+      ? work.sceneIds
+      : (work.scenes || []).map(scene => scene.id)
+    return ids
+      .map((sceneId, index) => sceneById.get(sceneId) || work.scenes?.[index])
+      .filter(Boolean)
+  }
+
+  function buildClipsForAutoWork(work, workScenes) {
+    const selectedSceneIds = new Set((work.sceneIds || []).filter(Boolean))
+    const userSelectedClips = finalClips
+      .filter(clip => clip.videoUrl && selectedSceneIds.has(clip.sceneId))
+      .map((clip, index) => normalizeFinalClip(clip, index, workScenes))
+      .filter(Boolean)
+    if (userSelectedClips.length) return userSelectedClips
+    if (Array.isArray(work.finalClips) && work.finalClips.some(clip => clip.videoUrl)) {
+      return work.finalClips
+    }
+    return buildDefaultFinalClips(workScenes)
+  }
+
+  function loadAutoWorkForEditing(work) {
+    const workScenes = getCurrentScenesForWork(work)
+    const clips = buildClipsForAutoWork(work, workScenes)
+    setFinalClips(clips)
+    setFinalVideo(work.finalVideo || null)
+    setFinalVideoRefreshToken(work.finalVideo?.local_refresh_token || work.finalVideo?.generated_at || work.finalVideo?.video_url || `${Date.now()}`)
+    setClipPreviewState({})
+    setNotice({ type: 'success', text: `已载入 ${work.title || '成品'}，可以继续编辑分镜和剪辑表。` })
+  }
+
+  function restoreAllScenesFromAutoWorks() {
+    const restoredWorks = collectRestorableAutoWorks(autoWorkArchive, autoWorks)
+    const restoredScenes = collectRestorableScenes(
+      batchSceneArchive,
+      scenes,
+      collectScenesFromAutoWorks(restoredWorks),
+    )
+    if (!restoredScenes.length) {
+      setNotice({ type: 'warning', text: '当前没有可恢复的批量分镜记录。' })
+      return
+    }
+    setScenes(restoredScenes)
+    setBatchSceneArchive(restoredScenes)
+    if (restoredWorks.length) {
+      setAutoWorks(restoredWorks)
+      setAutoWorkArchive(restoredWorks)
+    }
+    setClipPreviewState({})
+    const adSceneCount = restoredScenes.filter(scene => scene.referenceMode !== 'product_detail' && scene.reference_mode !== 'product_detail').length
+    const hasDetailScene = restoredScenes.some(scene => scene.referenceMode === 'product_detail' || scene.reference_mode === 'product_detail')
+    setNotice({
+      type: 'success',
+      text: `已恢复 ${restoredScenes.length} 条批量分镜（${adSceneCount} 条广告分镜${hasDetailScene ? ' + 1 条产品细节' : ''}）${restoredWorks.length ? `，并恢复 ${restoredWorks.length} 个批量成品。` : '。'}`,
+    })
+    return
+    {
+    const sceneMap = new Map()
+    let detailScene = null
+    autoWorks.forEach(work => {
+      ;(work.scenes || []).forEach(scene => {
+        if (!scene?.id) return
+        const isProductDetail = scene.referenceMode === 'product_detail' || scene.reference_mode === 'product_detail'
+        if (isProductDetail) {
+          detailScene = {
+            ...(detailScene || {}),
+            ...scene,
+          }
+          return
+        }
+        const key = scene.id
+        const existing = sceneMap.get(key)
+        sceneMap.set(key, normalizeScene({
+          ...(existing || {}),
+          ...scene,
+          storyboardImageHistory: mergeVersionHistory(
+            existing?.storyboardImageHistory || scene.storyboardImageHistory || scene.storyboard_image_history,
+            makeVersionItem(existing?.storyboard_image_url || scene.storyboard_image_url || scene.storyboardImageUrl),
+          ),
+          videoHistory: mergeVersionHistory(
+            existing?.videoHistory || scene.videoHistory || scene.video_history,
+            makeVersionItem(existing?.video_url || scene.video_url || scene.videoUrl),
+          ),
+        }, sceneMap.size))
+      })
+    })
+    const restoredScenes = Array.from(sceneMap.values())
+    if (detailScene) {
+      restoredScenes.push(normalizeScene(detailScene, restoredScenes.length))
+    }
+    if (!restoredScenes.length) {
+      setNotice({ type: 'warning', text: '当前没有可恢复的批量分镜记录。' })
+      return
+    }
+    setScenes(restoredScenes)
+    setClipPreviewState({})
+    setNotice({ type: 'success', text: `已恢复 ${restoredScenes.length} 条批量分镜，可继续选片审片。` })
+  }
+
+    }
+  async function handleRecoverLocalAssets() {
+    const folderPath = String(localRecoveryFolder || '').trim()
+    if (!folderPath) {
+      setNotice({ type: 'warning', text: '请先填写本地素材文件夹路径。' })
+      return
+    }
+    startLoading('recover-local-assets')
+    setNotice(null)
+    try {
+      const result = await api.post('/api/batch-video/recover-local-assets', {
+        folder_path: folderPath,
+        product_name: product.name,
+        limit: 120,
+      }, { timeout: 120_000 })
+      const recoveredScenes = (result.scenes || []).map((scene, index) => normalizeScene(scene || {}, index))
+      if (!recoveredScenes.length) {
+        setNotice({ type: 'warning', text: result.message || '没有找到可恢复的视频分镜。' })
+        return
+      }
+      const nextFinalClips = buildDefaultFinalClips(recoveredScenes)
+      const nextWorks = buildAutoWorksFromScenes(recoveredScenes, {
+        includeDetail: false,
+        preferredClips: nextFinalClips,
+      })
+      setScenes(recoveredScenes)
+      setBatchSceneArchive(prev => collectRestorableScenes(prev, recoveredScenes))
+      setAutoWorks(nextWorks)
+      setAutoWorkArchive(prev => collectRestorableAutoWorks(prev, nextWorks))
+      setFinalClips(nextFinalClips)
+      setFinalVideo(null)
+      setClipPreviewState({})
+      setNotice({
+        type: 'success',
+        text: result.message || `已恢复 ${recoveredScenes.length} 条本地视频分镜。`,
+      })
+    } catch (error) {
+      setNotice({ type: 'error', text: `本地素材恢复失败：${displayError(error)}` })
+    } finally {
+      finishLoading('recover-local-assets')
+    }
+  }
+
+  function continueAutoWorkCompose(work) {
+    const workScenes = getCurrentScenesForWork(work)
+    const readyAdScenes = workScenes.filter(scene => (
+      scene.video_url
+      && scene.referenceMode !== 'product_detail'
+      && scene.reference_mode !== 'product_detail'
+    ))
+    const readyScenes = workScenes.filter(scene => (
+      scene.video_url
+      && (scene.referenceMode !== 'product_detail' || readyAdScenes.length >= AUTO_WORK_MIN_SCENES)
+    ))
+    if (readyAdScenes.length < AUTO_WORK_MIN_SCENES) {
+      setNotice({ type: 'warning', text: '这条成品还不够 3 个可用广告片段，先生成或选片后再合成。' })
+      return
+    }
+    if (!productPosterUrl) {
+      setNotice({ type: 'warning', text: '请先生成或选择收尾产品海报，成品视频结尾需要带海报。' })
+      return
+    }
+    void composeAutoWork(work, readyScenes)
   }
 
   async function handleStoryboardUpload(sceneId, files) {
@@ -2532,6 +3199,64 @@ export default function BatchVideoWorkbenchPage() {
     } catch (error) {
       updateScene(scene.id, { status: 'failed', error: displayError(error) })
       setNotice({ type: 'error', text: `分镜图生成失败：${displayError(error)}` })
+    } finally {
+      finishLoading(taskKey)
+    }
+  }
+
+  async function generateStoryboardImageForAutoBatch(scene) {
+    if (isUnsupportedModel(imageModel, imageModels)) {
+      throw new Error('当前图片模型还没有接入适配器，请先切换可用图片模型。')
+    }
+    const productReferences = product.detailSheetUrl ? [product.detailSheetUrl] : []
+    if (!productReferences.length) {
+      throw new Error('请先用 Image2 还原产品完整形态，再自动批量生成分镜图和视频。')
+    }
+    const taskKey = `image-${scene.id}`
+    startLoading(taskKey)
+    updateScene(scene.id, { status: 'image_generating', error: '' })
+    try {
+      const provider = providerForModel(imageModel, imageModels, 'jimeng')
+      const referencePrompt = [
+        '【参考】只使用当前最终版 Image2 产品完整形态还原图作为唯一产品身份参考；必须保持同一款产品的轮廓、材质、结构、比例、鞋面、鞋底、扣具、纹理、配色和 logo 位置一致。',
+        '【批量差异】本条分镜来自批量生产矩阵，必须保留当前分镜的独立角度、场景、光线、机位和广告质感，不要复用上一条分镜构图。',
+        '【禁用】不要出现字幕、屏幕文字、价格、二维码、水印、主播、直播间、购买按钮、促销大字或电商 UI。',
+        sanitizeStoryboardPromptText(scene.image_prompt),
+      ].filter(Boolean).join(' ')
+      const result = await api.post('/api/game/generate_image', {
+        project_id: '',
+        prompt: referencePrompt,
+        provider,
+        model: imageModel,
+        aspect_ratio: aspectRatio,
+        asset_type: 'scene',
+        reference_urls: productReferences,
+        prompt_optimize_mode: 'standard',
+      })
+      const imageUrl = readMediaUrl(result)
+      if (!imageUrl) throw new Error('图片模型未返回分镜图地址')
+      const version = makeVersionItem(imageUrl, {
+        prompt: referencePrompt,
+        source: imageModel,
+        label: `分镜图 ${new Date().toLocaleTimeString()}`,
+      })
+      const nextScene = {
+        ...scene,
+        storyboard_image_url: imageUrl,
+        storyboardImageHistory: mergeVersionHistory(scene.storyboardImageHistory, version),
+        status: 'storyboard_ready',
+        error: '',
+      }
+      updateScene(scene.id, {
+        storyboard_image_url: nextScene.storyboard_image_url,
+        storyboardImageHistory: nextScene.storyboardImageHistory,
+        status: nextScene.status,
+        error: '',
+      })
+      return nextScene
+    } catch (error) {
+      updateScene(scene.id, { status: 'failed', error: displayError(error) })
+      throw error
     } finally {
       finishLoading(taskKey)
     }
@@ -2817,6 +3542,358 @@ export default function BatchVideoWorkbenchPage() {
     }
   }
 
+  async function handleAutoBatchGenerateVideos() {
+    if (!product.name.trim()) {
+      setNotice({ type: 'warning', text: '请先填写产品名称。' })
+      return
+    }
+    if (!product.detailSheetUrl) {
+      setNotice({ type: 'warning', text: '请先用 Image2 还原产品完整形态，自动批量需要用它锁定同一款产品外观。' })
+      return
+    }
+    const matrixScenes = createMatrixScenes()
+    if (!matrixScenes.length) {
+      setNotice({ type: 'warning', text: '请先整理卖点，或在手动卖点里至少填写一条。自动批量会按卖点生成不同角度的视频。' })
+      return
+    }
+
+    setScenes(matrixScenes)
+    setBatchResult({
+      message: `已创建 ${matrixScenes.length} 条不同角度的自动批量视频任务。`,
+      tasks: matrixScenes.map(scene => ({
+        id: scene.id,
+        title: scene.title,
+        scene_id: scene.id,
+        status: 'queued',
+      })),
+    })
+    setFinalVideo(null)
+    setFinalClips([])
+    setClipPreviewState({})
+    setAutoClipBuildPending(true)
+    startLoading('auto-batch-video')
+    setNotice({
+      type: 'info',
+      text: `正在按 ${matrixScenes.length} 个不同角度生成分镜图和视频，并发 ${AUTO_BATCH_CONCURRENCY} 个；剪辑表默认 0-${DEFAULT_AUTO_CLIP_DURATION}s / ${DEFAULT_AUTO_CLIP_PLAYBACK_RATE}x。`,
+    })
+
+    const generatedScenes = []
+    const failedScenes = []
+    try {
+      await runWithConcurrency(matrixScenes, AUTO_BATCH_CONCURRENCY, async scene => {
+        try {
+          const sceneWithImage = scene.storyboard_image_url ? scene : await generateStoryboardImageForAutoBatch(scene)
+          if (!sceneWithImage?.storyboard_image_url) {
+            throw new Error('分镜图生成失败，未进入视频生成。')
+          }
+          generatedScenes.push(sceneWithImage)
+          await handleGenerateVideo(sceneWithImage)
+        } catch (error) {
+          failedScenes.push({ scene, error })
+          updateScene(scene.id, { status: 'failed', error: displayError(error) })
+        }
+      })
+      setNotice({
+        type: failedScenes.length ? 'warning' : 'success',
+        text: failedScenes.length
+          ? `已提交 ${generatedScenes.length} 条不同角度视频，${failedScenes.length} 条失败；成功的视频生成完成后会自动回填剪辑表。`
+          : `已提交 ${generatedScenes.length} 条不同角度视频，生成完成后会自动回填剪辑表。`,
+      })
+    } catch (error) {
+      setNotice({ type: 'error', text: `按不同角度自动批量生成失败：${displayError(error)}` })
+    } finally {
+      finishLoading('auto-batch-video')
+    }
+  }
+
+  async function handleContinueIncompleteScenes() {
+    if (!scenes.length) {
+      setNotice({ type: 'warning', text: '当前页面还没有分镜，不能继续生成。' })
+      return
+    }
+    if (!product.detailSheetUrl) {
+      setNotice({ type: 'warning', text: '请先选择最终版 Image2 产品还原图，否则无法稳定继续生成分镜图和视频。' })
+      return
+    }
+    const pendingScenes = scenes.filter(scene => {
+      if (scene.video_url || scene.taskId || isProcessingTaskStatus(scene.status)) return false
+      if (scene.referenceMode === 'product_detail' || scene.reference_mode === 'product_detail') {
+        return true
+      }
+      return !scene.storyboard_image_url || !scene.video_url || scene.status === 'failed'
+    })
+    if (!pendingScenes.length) {
+      setNotice({ type: 'success', text: '当前没有需要继续生成的分镜：已完成或正在处理中的都会自动跳过。' })
+      return
+    }
+
+    startLoading('continue-scenes')
+    setNotice({
+      type: 'info',
+      text: `正在继续生成 ${pendingScenes.length} 个未完成分镜；已完成和正在处理的分镜会跳过。`,
+    })
+    const continuedScenes = []
+    const failedScenes = []
+    try {
+      await runWithConcurrency(pendingScenes, AUTO_BATCH_CONCURRENCY, async scene => {
+        try {
+          const isProductDetailScene = scene.referenceMode === 'product_detail' || scene.reference_mode === 'product_detail'
+          const sceneWithImage = isProductDetailScene || scene.storyboard_image_url
+            ? scene
+            : await generateStoryboardImageForAutoBatch(scene)
+          if (!isProductDetailScene && !sceneWithImage?.storyboard_image_url) {
+            throw new Error('分镜图生成失败，未进入视频生成。')
+          }
+          await handleGenerateVideo(sceneWithImage)
+          continuedScenes.push(sceneWithImage)
+        } catch (error) {
+          failedScenes.push({ scene, error })
+          updateScene(scene.id, { status: 'failed', error: displayError(error) })
+        }
+      })
+      setNotice({
+        type: failedScenes.length ? 'warning' : 'success',
+        text: failedScenes.length
+          ? `已继续提交 ${continuedScenes.length} 个分镜，${failedScenes.length} 个仍失败；稍后可再次点击继续。`
+          : `已继续提交 ${continuedScenes.length} 个未完成分镜，视频完成后会自动显示。`,
+      })
+    } catch (error) {
+      setNotice({ type: 'error', text: `继续生成失败：${displayError(error)}` })
+    } finally {
+      finishLoading('continue-scenes')
+    }
+  }
+
+  async function handleAutoBatchGenerateWorks() {
+    if (!product.name.trim()) {
+      setNotice({ type: 'warning', text: '请先填写产品名称。' })
+      return
+    }
+    if (!product.detailSheetUrl) {
+      setNotice({ type: 'warning', text: '请先用 Image2 还原产品完整形态，自动生成素材需要用它锁定同一款产品外观。' })
+      return
+    }
+    const matrixScenes = createMatrixScenes()
+    if (!matrixScenes.length) {
+      setNotice({ type: 'warning', text: '请先整理卖点，或在手动卖点里至少填写一条。' })
+      return
+    }
+    const nextWorks = buildAutoWorksFromScenes(matrixScenes, { includeDetail: true, preferredClips: finalClips })
+    const allScenes = nextWorks.flatMap(work => work.scenes || [])
+    if (!nextWorks.length || !allScenes.length) {
+      setNotice({ type: 'warning', text: '可生成的分镜不足，至少需要 3 个不同角度才能组成一条成品。' })
+      return
+    }
+    setScenes(allScenes)
+    setBatchSceneArchive(collectRestorableScenes(allScenes))
+    setAutoWorks(nextWorks)
+    setAutoWorkArchive(nextWorks)
+    setBatchResult({
+      message: `已创建 ${nextWorks.length} 条自动成品；每条默认 3-4 个广告分镜，优先追加产品细节视频，最终合成必须带海报。`,
+      tasks: nextWorks.map(work => ({
+        id: work.id,
+        title: work.title,
+        scene_id: work.id,
+        status: work.status,
+      })),
+    })
+    setFinalVideo(null)
+    setFinalClips([])
+    setClipPreviewState({})
+    setAutoClipBuildPending(false)
+    startLoading('auto-batch-video')
+    setNotice({
+      type: productPosterUrl ? 'info' : 'warning',
+      text: productPosterUrl
+        ? `正在生成 ${allScenes.length} 个素材，已分成 ${nextWorks.length} 条成品；素材完成后会自动合成带海报的成品。`
+        : `正在先生成 ${allScenes.length} 个素材；当前还没有海报，生成海报后会自动合成最终成品。`,
+    })
+
+    const generatedScenes = []
+    const failedScenes = []
+    try {
+      setAutoWorks(prev => prev.map(work => ({ ...work, status: 'generating', updatedAt: Date.now() })))
+      await runWithConcurrency(allScenes, AUTO_BATCH_CONCURRENCY, async scene => {
+        try {
+          const isProductDetailScene = scene.referenceMode === 'product_detail' || scene.reference_mode === 'product_detail'
+          if (scene.video_url) {
+            generatedScenes.push(scene)
+            return
+          }
+          const sceneWithImage = isProductDetailScene || scene.storyboard_image_url
+            ? scene
+            : await generateStoryboardImageForAutoBatch(scene)
+          if (!isProductDetailScene && !sceneWithImage?.storyboard_image_url) {
+            throw new Error('分镜图生成失败，未进入视频生成。')
+          }
+          generatedScenes.push(sceneWithImage)
+          await handleGenerateVideo(sceneWithImage)
+        } catch (error) {
+          failedScenes.push({ scene, error })
+          updateScene(scene.id, { status: 'failed', error: displayError(error) })
+        }
+      })
+      setAutoWorks(prev => prev.map(work => {
+        const hasFailedScene = failedScenes.some(item => (work.sceneIds || []).includes(item.scene.id))
+        return {
+          ...work,
+          status: 'submitted',
+          error: hasFailedScene ? '部分素材生成失败；如果仍有 3 个以上广告片段可用，会继续尝试合成。' : '',
+          updatedAt: Date.now(),
+        }
+      }))
+      setNotice({
+        type: failedScenes.length ? 'warning' : 'success',
+        text: failedScenes.length
+          ? `已提交 ${generatedScenes.length} 个素材，${failedScenes.length} 个失败；有足够可用片段的成品会继续自动合成。`
+          : `已提交 ${generatedScenes.length} 个素材，完成后会按成品组自动混剪并追加海报。`,
+      })
+    } catch (error) {
+      setNotice({ type: 'error', text: `按不同角度自动批量生成失败：${displayError(error)}` })
+    } finally {
+      finishLoading('auto-batch-video')
+    }
+  }
+
+  async function composeVideoFromClips(sourceClips, sourceScenes, outputName = '', voiceoverStyle = '') {
+    const segments = buildSegmentsFromClips(sourceClips, sourceScenes)
+    if (!segments.length) {
+      throw new Error('没有可用的视频片段')
+    }
+    if (!productPosterUrl) {
+      throw new Error('请先生成或选择收尾产品海报')
+    }
+    const selectedTtsVoiceType = ttsVoiceType === 'custom' ? ttsCustomVoiceType.trim() : ttsVoiceType
+    const selectedBgmVolume = clampNumber(bgmVolume, 0, 1, 0.45)
+    const selectedVoiceoverVolume = clampNumber(voiceoverVolume, 0.2, 2, DEFAULT_VOICEOVER_VOLUME)
+    return api.post('/api/batch-video/compose-final-video', {
+      segments,
+      product_name: product.name || '',
+      product_description: product.description || product.category || '',
+      selling_points: [
+        ...sellingPoints.map(point => point.title || point.description).filter(Boolean),
+        ...sourceScenes.map(scene => scene.selling_point || scene.hook || scene.title).filter(Boolean),
+      ].slice(0, 12),
+      voiceover_style: voiceoverStyle,
+      aspect_ratio: isVeoModel(videoModel) ? normalizeVeoAspectRatio(aspectRatio) : aspectRatio,
+      subtitle_enabled: true,
+      voiceover_enabled: true,
+      keep_original_audio: true,
+      bgm_enabled: bgmEnabled,
+      bgm_url: bgmEnabled ? bgmUrl : '',
+      original_audio_volume: 0.35,
+      voiceover_volume: selectedVoiceoverVolume,
+      rhythm_match_enabled: rhythmMatchEnabled,
+      bgm_volume: selectedBgmVolume,
+      poster_image_url: productPosterUrl || '',
+      poster_duration: 0,
+      tts_provider: 'doubao_speech_2_0',
+      tts_voice_type: selectedTtsVoiceType,
+      tts_speed_ratio: Number(ttsSpeedRatio) || 1,
+      output_name: outputName || product.name || 'batch_final_video',
+    })
+  }
+
+  async function composeAutoWork(work, workScenes) {
+    if (!work?.id || autoWorkComposingRef.current.has(work.id)) return
+    const clips = buildClipsForAutoWork(work, workScenes).filter(clip => clip.videoUrl)
+    const usableAdClips = clips.filter(clip => {
+      const scene = workScenes.find(item => item.id === clip.sceneId)
+      return scene?.referenceMode !== 'product_detail'
+    })
+    if (usableAdClips.length < AUTO_WORK_MIN_SCENES) return
+    autoWorkComposingRef.current.add(work.id)
+    setAutoWorks(prev => prev.map(item => (
+      item.id === work.id ? { ...item, status: 'composing', error: '', finalClips: clips, updatedAt: Date.now() } : item
+    )))
+    try {
+      const composeStartedAt = new Date().toISOString()
+      const result = await composeVideoFromClips(
+        clips,
+        workScenes,
+        `${product.name || 'product'}_${work.title || work.id}`,
+        work.strategy || work.title || '',
+      )
+      if (result.status !== 'completed' || !result.video_url) {
+        throw new Error(result.message || '成片合成失败')
+      }
+      const nextFinalVideo = {
+        ...result,
+        generated_at: composeStartedAt,
+        local_refresh_token: `${Date.now()}`,
+      }
+      setAutoWorks(prev => prev.map(item => (
+        item.id === work.id
+          ? {
+            ...item,
+            status: 'completed',
+            error: '',
+            scenes: workScenes,
+            finalClips: clips,
+            finalVideo: nextFinalVideo,
+            updatedAt: Date.now(),
+          }
+          : item
+      )))
+    } catch (error) {
+      setAutoWorks(prev => prev.map(item => (
+        item.id === work.id ? { ...item, status: 'failed', error: displayError(error), updatedAt: Date.now() } : item
+      )))
+    } finally {
+      autoWorkComposingRef.current.delete(work.id)
+    }
+  }
+
+  function handleMixSelectedClipsIntoWorks() {
+    const usableClips = finalClips.filter(clip => clip.videoUrl)
+    if (!usableClips.length) {
+      setNotice({ type: 'warning', text: '请先在剪辑表里用滑块选好可用片段，再批量混剪成品。' })
+      return
+    }
+    if (!productPosterUrl) {
+      setNotice({ type: 'warning', text: '请先生成或选择收尾产品海报；自动混剪的每条成品都会带海报。' })
+      return
+    }
+    const groups = splitAutoWorkClipGroups(usableClips)
+    if (!groups.length) {
+      setNotice({ type: 'warning', text: '可用片段不足，至少需要 3 个片段才能自动混剪一条成品。' })
+      return
+    }
+    const nextWorks = groups.map((group, workIndex) => {
+      const workId = `mix_work_${Date.now()}_${workIndex}_${Math.random().toString(36).slice(2, 7)}`
+      const sceneIds = Array.from(new Set(group.map(clip => clip.sceneId).filter(Boolean)))
+      const groupScenes = sceneIds.map(sceneId => scenes.find(scene => scene.id === sceneId)).filter(Boolean)
+      const detailScene = scenes.find(scene => scene.referenceMode === 'product_detail' && scene.video_url)
+      const workScenes = [...groupScenes, detailScene].filter(Boolean).map(scene => ({ ...scene, autoWorkId: workId }))
+      const clips = group
+        .map((clip, clipIndex) => normalizeFinalClip(clip, clipIndex, workScenes))
+        .filter(Boolean)
+      if (detailScene && !clips.some(clip => clip.sceneId === detailScene.id)) {
+        const detailClip = createFinalClipFromScene(detailScene, clips.length)
+        if (detailClip) clips.push(detailClip)
+      }
+      return normalizeAutoWork({
+        id: workId,
+        title: `混剪成品 ${workIndex + 1}`,
+        strategy: groupScenes.map(scene => scene.selling_point || scene.title).filter(Boolean).join(' / '),
+        status: 'ready',
+        scenes: workScenes,
+        sceneIds: workScenes.map(scene => scene.id),
+        finalClips: clips,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }, workIndex)
+    })
+    const mergedWorks = collectRestorableAutoWorks(autoWorks, autoWorkArchive, nextWorks)
+    setAutoWorks(mergedWorks)
+    setAutoWorkArchive(mergedWorks)
+    setBatchResult({
+      message: `已按你选好的片段创建 ${nextWorks.length} 条低同质化混剪成品，正在自动合成。`,
+      tasks: mergedWorks.map(work => ({ id: work.id, title: work.title, status: work.status })),
+    })
+    setNotice({ type: 'info', text: `已创建 ${nextWorks.length} 条混剪成品，会优先使用你滑块选好的开始/结束时间，并全部追加海报。` })
+  }
+
   async function handleComposeFinalVideo() {
     const usableFinalClips = finalClips.filter(clip => clip.videoUrl)
     const defaultFinalClips = buildDefaultFinalClips(scenes)
@@ -2859,35 +3936,22 @@ export default function BatchVideoWorkbenchPage() {
       setNotice(null)
     }
     startLoading('compose-final-video')
+    setFinalVideo(null)
+    setFinalVideoRefreshToken(`pending_${Date.now()}`)
     try {
-      const selectedTtsVoiceType = ttsVoiceType === 'custom' ? ttsCustomVoiceType.trim() : ttsVoiceType
-      const selectedBgmVolume = clampNumber(bgmVolume, 0, 1, 0.45)
-      const selectedVoiceoverVolume = clampNumber(voiceoverVolume, 0.2, 2, DEFAULT_VOICEOVER_VOLUME)
-      const result = await api.post('/api/batch-video/compose-final-video', {
-        segments,
-        product_name: product.name || '',
-        aspect_ratio: isVeoModel(videoModel) ? normalizeVeoAspectRatio(aspectRatio) : aspectRatio,
-        subtitle_enabled: true,
-        voiceover_enabled: true,
-        keep_original_audio: true,
-        bgm_enabled: bgmEnabled,
-        bgm_url: bgmEnabled ? bgmUrl : '',
-        original_audio_volume: 0.78,
-        voiceover_volume: selectedVoiceoverVolume,
-        rhythm_match_enabled: rhythmMatchEnabled,
-        bgm_volume: selectedBgmVolume,
-        poster_image_url: productPosterUrl || '',
-        poster_duration: 0,
-        tts_provider: 'doubao_speech_2_0',
-        tts_voice_type: selectedTtsVoiceType,
-        tts_speed_ratio: Number(ttsSpeedRatio) || 1,
-        output_name: product.name || 'batch_final_video',
-      })
+      const composeStartedAt = new Date().toISOString()
+      const result = await composeVideoFromClips(sourceClips, scenes, product.name || 'batch_final_video', 'manual final mix')
       if (result.status !== 'completed' || !result.video_url) {
         setNotice({ type: result.status === 'needs_video' ? 'warning' : 'error', text: result.message || '完整视频合成失败。' })
         return
       }
-      setFinalVideo(result)
+      const nextFinalVideo = {
+        ...result,
+        generated_at: composeStartedAt,
+        local_refresh_token: `${Date.now()}`,
+      }
+      setFinalVideo(nextFinalVideo)
+      setFinalVideoRefreshToken(`${nextFinalVideo.video_url}_${nextFinalVideo.local_refresh_token}`)
       setNotice({
         type: result.voiceover_error ? 'warning' : 'success',
         text: result.message || (result.voiceover_generated ? '完整视频已合成，并已加入豆包语音合成 2.0 旁白。' : '完整视频已合成。'),
@@ -2902,6 +3966,13 @@ export default function BatchVideoWorkbenchPage() {
   const hasSceneVideos = scenes.some(scene => scene.video_url)
   const hasUsableFinalClips = finalClips.some(clip => clip.videoUrl)
   const canComposeFinalVideo = hasSceneVideos || hasUsableFinalClips
+  const reviewableScenes = buildReviewableSceneCandidates(scenes, autoWorks)
+  const selectedFinalClips = finalClips.filter(clip => clip.videoUrl)
+  const selectedClipGroups = splitAutoWorkClipGroups(selectedFinalClips)
+  const selectedClipCountBySceneId = selectedFinalClips.reduce((acc, clip) => {
+    if (clip.sceneId) acc[clip.sceneId] = (acc[clip.sceneId] || 0) + 1
+    return acc
+  }, {})
 
   return (
     <div className="batch-video-workbench">
@@ -3287,7 +4358,37 @@ export default function BatchVideoWorkbenchPage() {
             <span>图片首帧 + 视频分镜</span>
           </div>
         </div>
+        <div className="batch-video-local-recovery">
+          <div className="batch-video-local-recovery-copy">
+            <strong>本地素材恢复</strong>
+            <span>把已经下载到本机的分镜图和视频恢复回当前分镜列表，适合从 ToAPIs 任务日志重新下载后找回。</span>
+          </div>
+          <input
+            value={localRecoveryFolder}
+            onChange={event => setLocalRecoveryFolder(event.target.value)}
+            placeholder="例如：C:\Users\Administrator\Desktop\素材\ai素材"
+          />
+          <button
+            type="button"
+            className="batch-video-button ghost"
+            onClick={handleRecoverLocalAssets}
+            disabled={isLoading('recover-local-assets')}
+          >
+            <FolderOpen size={16} />
+            {isLoading('recover-local-assets') ? '恢复中' : '从本地素材恢复'}
+          </button>
+        </div>
         <div className="batch-video-toolbar">
+          {autoWorks.length > 0 && (
+            <button
+              type="button"
+              className="batch-video-button ghost"
+              onClick={restoreAllScenesFromAutoWorks}
+            >
+              <RefreshCw size={16} />
+              恢复全部分镜
+            </button>
+          )}
           <label className="batch-video-field compact-field">
             <span>画幅</span>
             <select value={aspectRatio} onChange={event => setAspectRatio(event.target.value)}>
@@ -3745,7 +4846,133 @@ export default function BatchVideoWorkbenchPage() {
             onSelect={selectProductPosterVersion}
           />
         </div>
+        <div className="batch-video-review-panel">
+          <div className="batch-video-review-head">
+            <div>
+              <strong><ListChecks size={16} /> 选片审片</strong>
+              <span>先挑可用画面，再在下方剪辑表拖动开始/结束，最后批量混剪成品。</span>
+            </div>
+            <div className="batch-video-review-stats">
+              <span>{reviewableScenes.length} 个已生成视频</span>
+              <span>{selectedFinalClips.length} 段已选片段</span>
+              <span>约 {selectedClipGroups.length} 条可混剪成品</span>
+            </div>
+          </div>
+          <div className="batch-video-review-actions">
+            <button
+              type="button"
+              className="batch-video-button ghost"
+              onClick={appendAllReviewableScenesToFinalClips}
+              disabled={!reviewableScenes.length}
+            >
+              <RefreshCw size={16} />
+              全部加入片段池
+            </button>
+            <button
+              type="button"
+              className="batch-video-button primary"
+              onClick={handleMixSelectedClipsIntoWorks}
+              disabled={!selectedFinalClips.length}
+            >
+              <Scissors size={16} />
+              用已选片段批量混剪
+            </button>
+          </div>
+          <div className="batch-video-review-grid">
+            <div className="batch-video-review-library">
+              <div className="batch-video-review-subtitle">
+                <strong>生成素材候选</strong>
+                <span>每个分镜可多次加入，方便截取不同区间。</span>
+              </div>
+              {reviewableScenes.length > 0 ? (
+                <div className="batch-video-review-card-grid">
+                  {reviewableScenes.map((scene, sceneIndex) => {
+                    const selectedCount = selectedClipCountBySceneId[scene.sourceSceneId || scene.id] || 0
+                    return (
+                      <article className="batch-video-review-card" key={`${scene.sourceSceneId || scene.id}_${scene.candidateVideoUrl || scene.video_url}`}>
+                        <div className="batch-video-review-preview">
+                          <video src={assetUrl(scene.video_url)} controls preload="metadata" playsInline />
+                        </div>
+                        <div className="batch-video-review-card-body">
+                          <strong>#{sceneIndex + 1} {scene.title || '未命名分镜'}</strong>
+                          <span>{scene.hook || scene.selling_point || scene.voiceover_text || '已生成可选视频素材'}</span>
+                          <div className="batch-video-review-card-actions">
+                            <button type="button" className="batch-video-button ghost" onClick={() => appendFinalClipFromScene(scene)}>
+                              <Plus size={15} />
+                              加入可用片段
+                            </button>
+                            {selectedCount > 0 && <em>已选 {selectedCount} 段</em>}
+                          </div>
+                        </div>
+                      </article>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="batch-video-empty compact">
+                  <FileVideo size={24} />
+                  <span>还没有可审片的视频，先继续生成未完成分镜。</span>
+                </div>
+              )}
+            </div>
+            <div className="batch-video-review-pool">
+              <div className="batch-video-review-subtitle">
+                <strong>已选片段池</strong>
+                <span>下方剪辑表可以逐段设开始、结束、倍速和旁白。</span>
+              </div>
+              {selectedFinalClips.length > 0 ? (
+                <div className="batch-video-review-clip-list">
+                  {selectedFinalClips.map((clip, clipIndex) => {
+                    const clipScene = scenes.find(scene => scene.id === clip.sceneId)
+                    const clipStart = clip.startTime === '' ? 0 : Number(clip.startTime || 0)
+                    const clipEndText = clip.endTime === '' ? '到结尾' : formatClipTime(clip.endTime)
+                    const clipRate = normalizeClipPlaybackRate(clip.playbackRate)
+                    return (
+                      <div className="batch-video-review-clip" key={clip.id}>
+                        <div>
+                          <strong>{clipIndex + 1}. {clip.title || clipScene?.title || '可用片段'}</strong>
+                          <span>{formatClipTime(clipStart)} - {clipEndText} / {clipRate}x</span>
+                        </div>
+                        <div className="batch-video-review-clip-actions">
+                          <button type="button" title="复制片段" onClick={() => duplicateFinalClip(clip.id)}>
+                            <Copy size={14} />
+                          </button>
+                          <button type="button" title="移出片段池" onClick={() => removeFinalClip(clip.id)}>
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="batch-video-empty compact">
+                  <Scissors size={24} />
+                  <span>左侧加入片段后，这里会显示待混剪素材。</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
         <div className="batch-video-final-toolbar">
+          <button
+            type="button"
+            className="batch-video-button primary"
+            onClick={handleAutoBatchGenerateWorks}
+            disabled={isLoading('auto-batch-video') || !product.name.trim()}
+          >
+            <Video size={16} />
+            {isLoading('auto-batch-video') ? '批量生成中' : '按不同角度批量生成视频'}
+          </button>
+          <button
+            type="button"
+            className="batch-video-button ghost"
+            onClick={handleContinueIncompleteScenes}
+            disabled={isLoading('continue-scenes') || !scenes.length}
+          >
+            <RefreshCw size={16} />
+            {isLoading('continue-scenes') ? '继续生成中' : '继续生成未完成'}
+          </button>
           <span>剪辑表 {finalClips.filter(clip => clip.videoUrl).length} 段，可截取不同版本混剪</span>
           <button
             type="button"
@@ -3755,6 +4982,15 @@ export default function BatchVideoWorkbenchPage() {
           >
             <RefreshCw size={16} />
             按最终版本生成剪辑表
+          </button>
+          <button
+            type="button"
+            className="batch-video-button ghost"
+            onClick={handleMixSelectedClipsIntoWorks}
+            disabled={!finalClips.some(clip => clip.videoUrl)}
+          >
+            <Scissors size={16} />
+            按已选片段批量混剪成品
           </button>
           <button
             type="button"
@@ -3988,15 +5224,114 @@ export default function BatchVideoWorkbenchPage() {
         )}
         {finalVideo?.video_url && (
           <div className="batch-video-final-result">
-            <video src={assetUrl(finalVideo.video_url)} controls />
+            <video
+              key={`${finalVideo.video_url}_${finalVideoRefreshToken}`}
+              src={cacheBustedAssetUrl(finalVideo.video_url, finalVideoRefreshToken)}
+              controls
+            />
             <div className="batch-video-final-meta">
               {finalVideo.poster_appended
                 ? `已追加收尾海报，停留约 ${Number(finalVideo.poster_duration || 0).toFixed(1)} 秒`
                 : '这条成片未追加收尾海报'}
             </div>
-            <a className="batch-video-button ghost" href={assetUrl(finalVideo.video_url)} download>
+            <a className="batch-video-button ghost" href={cacheBustedAssetUrl(finalVideo.video_url, finalVideoRefreshToken)} download>
               下载完整视频
             </a>
+          </div>
+        )}
+        {autoWorks.length > 0 && (
+          <div className="batch-video-auto-works">
+            <div className="batch-video-auto-works-head">
+              <div>
+                <strong>批量成品</strong>
+                <span>每条成品由 3-4 个广告片段混剪，产品细节视频有则加入，结尾必须带海报。</span>
+              </div>
+              <button
+                type="button"
+                className="batch-video-button ghost"
+                onClick={restoreAllScenesFromAutoWorks}
+              >
+                <ListChecks size={16} />
+                恢复全部分镜
+              </button>
+              <button
+                type="button"
+                className="batch-video-button ghost"
+                onClick={handleMixSelectedClipsIntoWorks}
+                disabled={!finalClips.some(clip => clip.videoUrl)}
+              >
+                <Scissors size={16} />
+                用当前剪辑表重新混剪
+              </button>
+            </div>
+            <div className="batch-video-auto-work-grid">
+              {autoWorks.map((work, workIndex) => {
+                const workScenes = getCurrentScenesForWork(work)
+                const adCount = workScenes.filter(scene => scene.referenceMode !== 'product_detail' && scene.reference_mode !== 'product_detail').length
+                const detailReady = workScenes.some(scene => (scene.referenceMode === 'product_detail' || scene.reference_mode === 'product_detail') && scene.video_url)
+                const finalWorkVideoUrl = work.finalVideo?.video_url || ''
+                const previewUrl = finalWorkVideoUrl
+                  || workScenes.find(scene => scene.video_url)?.video_url
+                  || workScenes.find(scene => scene.storyboard_image_url)?.storyboard_image_url
+                  || productPosterUrl
+                const isGeneratedVideo = Boolean(finalWorkVideoUrl)
+                const isVideoPreview = Boolean(finalWorkVideoUrl || workScenes.find(scene => scene.video_url)?.video_url)
+                return (
+                  <div className="batch-video-auto-work-card" key={work.id || workIndex}>
+                    <button
+                      type="button"
+                      className="batch-video-auto-work-preview"
+                      onClick={() => loadAutoWorkForEditing(work)}
+                      title="进入编辑模式"
+                    >
+                      {isVideoPreview && previewUrl ? (
+                        <video src={assetUrl(previewUrl)} muted playsInline preload="metadata" />
+                      ) : previewUrl ? (
+                        <img src={assetUrl(previewUrl)} alt={work.title || `成品 ${workIndex + 1}`} />
+                      ) : (
+                        <span>{workIndex + 1}</span>
+                      )}
+                    </button>
+                    <div className="batch-video-auto-work-body">
+                      <strong>{work.title || `成品 ${workIndex + 1}`}</strong>
+                      <span>{autoWorkStatusText(work.status)} · {adCount} 个广告片段 · {detailReady ? '含产品细节' : '细节可缺省'} · 带海报</span>
+                      {work.strategy && <span className="batch-video-auto-work-strategy">{work.strategy}</span>}
+                      {work.error && <em>{work.error}</em>}
+                      {finalWorkVideoUrl && (
+                        <video
+                          className="batch-video-auto-work-final-player"
+                          src={cacheBustedAssetUrl(finalWorkVideoUrl, work.finalVideo?.local_refresh_token || work.finalVideo?.generated_at || '')}
+                          controls
+                          playsInline
+                          preload="metadata"
+                        />
+                      )}
+                      <div className="batch-video-auto-work-actions">
+                        <button type="button" className="batch-video-button ghost" onClick={() => loadAutoWorkForEditing(work)}>
+                          编辑此成品
+                        </button>
+                        {!finalWorkVideoUrl && (
+                          <button
+                            type="button"
+                            className="batch-video-button primary"
+                            onClick={() => continueAutoWorkCompose(work)}
+                            disabled={autoWorkComposingRef.current.has(work.id)}
+                          >
+                            <Scissors size={15} />
+                            {work.status === 'composing' ? '继续合成中' : '继续合成'}
+                          </button>
+                        )}
+                        {work.finalVideo?.video_url && (
+                          <a className="batch-video-button ghost" href={assetUrl(work.finalVideo.video_url)} download>
+                            下载
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
           </div>
         )}
       </section>
@@ -4019,17 +5354,20 @@ export default function BatchVideoWorkbenchPage() {
           <button
             type="button"
             className="batch-video-button ghost"
-            onClick={() => {
-              scenes.forEach(scene => {
-                if (scene.status !== 'video_generating' && scene.status !== 'processing') {
-                  void handleGenerateVideo(scene)
-                }
-              })
-            }}
-            disabled={!scenes.length}
+            onClick={handleAutoBatchGenerateWorks}
+            disabled={isLoading('auto-batch-video') || !product.name.trim()}
           >
-            <Play size={16} />
-            批量生成视频
+            <Video size={16} />
+            {isLoading('auto-batch-video') ? '批量生成中' : '按不同角度批量生成视频'}
+          </button>
+          <button
+            type="button"
+            className="batch-video-button ghost"
+            onClick={handleMixSelectedClipsIntoWorks}
+            disabled={!finalClips.some(clip => clip.videoUrl)}
+          >
+            <Scissors size={16} />
+            按已选片段混剪成品
           </button>
         </div>
         {batchResult?.tasks?.length ? (
@@ -4037,7 +5375,14 @@ export default function BatchVideoWorkbenchPage() {
             {batchResult.tasks.map(task => (
               <div className="batch-video-task-row" key={task.id}>
                 <span>{task.title || task.scene_id}</span>
-                <code>{task.status}</code>
+                <div className="batch-video-task-status">
+                  <code>{task.status}</code>
+                  {task.video_url && (
+                    <a className="batch-video-button ghost" href={assetUrl(task.video_url)} download>
+                      下载成片
+                    </a>
+                  )}
+                </div>
               </div>
             ))}
           </div>

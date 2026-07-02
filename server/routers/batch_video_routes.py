@@ -147,8 +147,12 @@ DEFAULT_STORYBOARD_SCENE_COUNT = 6
 VEO_STORYBOARD_SCENE_COUNT = 4
 VEO_STORYBOARD_DURATION = 8
 WORKBENCH_DRAFT_SETTING_KEY = "batch_video_workbench_draft_v1"
+PRODUCT_VIDEO_WORKBENCH_DRAFT_SETTING_KEY = "batch_product_video_workbench_draft_v1"
 PRODUCT_MEMORY_SETTING_KEY = "batch_video_product_memory_v1"
+PRODUCT_SHOWCASE_MEMORY_SETTING_KEY = "batch_product_video_product_memory_v1"
 PRODUCT_MEMORY_LIMIT = 80
+STORYBOARD_MODE_AD_FILM = "ad_film"
+STORYBOARD_MODE_PRODUCT_SHOWCASE = "product_showcase"
 
 
 def _toapis_price_overrides() -> dict[str, float]:
@@ -221,6 +225,9 @@ class StoryboardPlanRequest(BaseModel):
     selling_points: list[SellingPoint] = Field(default_factory=list)
     storyboard_reference_urls: list[str] = Field(default_factory=list)
     creative_brief: str = ""
+    storyboard_mode: str = STORYBOARD_MODE_AD_FILM
+    batch_strategy: dict[str, Any] = Field(default_factory=dict)
+    work_index: int = 0
     language_model: str = "doubao-seed-2-0-pro-260215"
     image_model: str = "seedream-5.0"
     video_model: str = "seedance-2.0"
@@ -282,13 +289,16 @@ class FinalVideoSegment(BaseModel):
 class ComposeFinalVideoRequest(BaseModel):
     segments: list[FinalVideoSegment] = Field(default_factory=list)
     product_name: str = ""
+    product_description: str = ""
+    selling_points: list[str] = Field(default_factory=list)
+    voiceover_style: str = ""
     aspect_ratio: str = "9:16"
     subtitle_enabled: bool = True
     voiceover_enabled: bool = True
     keep_original_audio: bool = True
     bgm_enabled: bool = True
     bgm_url: str = ""
-    original_audio_volume: float = 0.78
+    original_audio_volume: float = 0.35
     voiceover_volume: float = 1.35
     rhythm_match_enabled: bool = False
     bgm_volume: float = 0.45
@@ -307,6 +317,12 @@ class WorkbenchDraftRequest(BaseModel):
 class ProductMemoryRequest(BaseModel):
     product_name: str = ""
     memory: dict[str, Any] = Field(default_factory=dict)
+
+
+class LocalAssetRecoveryRequest(BaseModel):
+    folder_path: str = ""
+    product_name: str = ""
+    limit: int = 80
 
 
 def _now() -> str:
@@ -355,7 +371,11 @@ def _is_cloud_forwarded_request(request: Request | None) -> bool:
     return (request.headers.get("X-Wanpi-Cloud-Sync") or "").strip() == "1"
 
 
-def _cloud_memory_url(product_name: str) -> str:
+def _workbench_mode(value: str = "") -> str:
+    return STORYBOARD_MODE_PRODUCT_SHOWCASE if value == STORYBOARD_MODE_PRODUCT_SHOWCASE else STORYBOARD_MODE_AD_FILM
+
+
+def _cloud_memory_url(product_name: str, workbench: str = STORYBOARD_MODE_AD_FILM) -> str:
     return f"/api/batch-video/product-memory?product_name={quote(product_name or '')}"
 
 
@@ -432,7 +452,7 @@ async def _upload_cloud_memory_files(memory: dict[str, Any], cloud_url: str, clo
     return uploaded
 
 
-async def _fetch_cloud_product_memory(product_name: str, request: Request | None = None) -> dict[str, Any] | None:
+async def _fetch_cloud_product_memory(product_name: str, request: Request | None = None, workbench: str = STORYBOARD_MODE_AD_FILM) -> dict[str, Any] | None:
     if _is_cloud_forwarded_request(request):
         return None
     cloud_url, cloud_token = _cloud_sync_config()
@@ -443,7 +463,7 @@ async def _fetch_cloud_product_memory(product_name: str, request: Request | None
         if client is None:
             return None
         resp = await client.get(
-            f"{cloud_url}{_cloud_memory_url(product_name)}",
+            f"{cloud_url}{_cloud_memory_url(product_name, workbench)}",
             headers={
                 "Authorization": f"Bearer {cloud_token}",
                 "X-Wanpi-Cloud-Sync": "1",
@@ -459,7 +479,7 @@ async def _fetch_cloud_product_memory(product_name: str, request: Request | None
         return None
 
 
-async def _push_cloud_product_memory(product_name: str, memory: dict[str, Any], request: Request | None = None) -> bool:
+async def _push_cloud_product_memory(product_name: str, memory: dict[str, Any], request: Request | None = None, workbench: str = STORYBOARD_MODE_AD_FILM) -> bool:
     if _is_cloud_forwarded_request(request):
         return False
     cloud_url, cloud_token = _cloud_sync_config()
@@ -485,8 +505,8 @@ async def _push_cloud_product_memory(product_name: str, memory: dict[str, Any], 
         return False
 
 
-def _load_product_memories() -> dict[str, Any]:
-    raw = db.get_user_setting(PRODUCT_MEMORY_SETTING_KEY, "")
+def _load_product_memory_setting(setting_key: str) -> dict[str, Any]:
+    raw = db.get_user_setting(setting_key, "")
     if not raw:
         return {}
     try:
@@ -496,7 +516,132 @@ def _load_product_memories() -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _save_product_memories(memories: dict[str, Any]) -> None:
+def _safe_recovery_folder(folder_path: str) -> Path:
+    raw = (folder_path or "").strip().strip('"')
+    if not raw:
+        raise ValueError("请输入本地素材文件夹路径。")
+    path = Path(raw).expanduser()
+    try:
+        path = path.resolve()
+    except Exception:
+        path = path.absolute()
+    if not path.exists() or not path.is_dir():
+        raise ValueError(f"素材文件夹不存在：{path}")
+    return path
+
+
+def _recoverable_asset_files(folder: Path, limit: int = 80) -> tuple[list[Path], list[Path]]:
+    image_exts = {".png", ".jpg", ".jpeg", ".webp"}
+    video_exts = {".mp4", ".webm", ".mov", ".m4v"}
+    files = [path for path in folder.rglob("*") if path.is_file()]
+    images = [path for path in files if path.suffix.lower() in image_exts]
+    videos = [path for path in files if path.suffix.lower() in video_exts]
+    images.sort(key=lambda path: (path.stat().st_mtime, path.name))
+    videos.sort(key=lambda path: (path.stat().st_mtime, path.name))
+    max_items = max(1, min(int(limit or 80), 200))
+    return images[-max_items:], videos[-max_items:]
+
+
+def _copy_recovered_asset(path: Path, prefix: str) -> str:
+    ext = path.suffix.lower() or ".bin"
+    digest = hashlib.sha1(str(path).encode("utf-8", errors="ignore")).hexdigest()[:10]
+    filename = f"{prefix}_{path.stem[:40]}_{digest}{ext}"
+    filename = re.sub(r"[^A-Za-z0-9_.-]+", "_", filename)
+    target = deps.get_files_dir() / filename
+    if not target.exists() or target.stat().st_size != path.stat().st_size:
+        shutil.copy2(path, target)
+        deps.notify_media_file_saved(target)
+    return f"/api/files/{target.name}"
+
+
+def _timestamp_prefix(path: Path) -> str:
+    match = re.match(r"(\d{8,})", path.stem)
+    return match.group(1) if match else ""
+
+
+def _pair_images_to_videos(images: list[Path], videos: list[Path]) -> dict[Path, Path]:
+    remaining = list(images)
+    pairs: dict[Path, Path] = {}
+    for video in videos:
+        if not remaining:
+            break
+        video_prefix = _timestamp_prefix(video)
+        same_prefix = [img for img in remaining if video_prefix and _timestamp_prefix(img) == video_prefix]
+        candidates = same_prefix or remaining
+        video_mtime = video.stat().st_mtime
+        image = min(candidates, key=lambda img: abs(img.stat().st_mtime - video_mtime))
+        pairs[video] = image
+        remaining.remove(image)
+    return pairs
+
+
+def _recovered_scene_title(path: Path, index: int, product_name: str = "") -> str:
+    stem = path.stem.replace("_", " ")
+    product = _clean_text(product_name, 40) or "恢复素材"
+    return f"{index + 1}. {product} - 本地恢复分镜 {stem[-8:]}"
+
+
+def _build_recovered_scene(video_path: Path, image_path: Path | None, index: int, product_name: str = "") -> dict[str, Any]:
+    video_url = _copy_recovered_asset(video_path, "recovered_video")
+    image_url = _copy_recovered_asset(image_path, "recovered_image") if image_path else ""
+    title = _recovered_scene_title(video_path, index, product_name)
+    version_label = f"本地恢复 {datetime.fromtimestamp(video_path.stat().st_mtime).strftime('%H:%M:%S')}"
+    return {
+        "id": f"recovered_{int(video_path.stat().st_mtime * 1000)}_{index}_{hashlib.sha1(str(video_path).encode()).hexdigest()[:8]}",
+        "title": title,
+        "selling_point": "",
+        "hook": title,
+        "image_prompt": "从本地素材恢复的分镜图，可继续编辑提示词。",
+        "video_prompt": "从本地素材恢复的视频，可继续进入选片审片和剪辑表。",
+        "voiceover_text": "",
+        "shot_notes": f"本地恢复：{video_path.name}",
+        "storyboard_image_url": image_url,
+        "video_url": video_url,
+        "status": "completed",
+        "error": "",
+        "taskId": "",
+        "storyboardImageHistory": ([{
+            "id": f"recovered_image_{index}",
+            "url": image_url,
+            "prompt": "",
+            "label": version_label,
+            "source": "local-folder",
+            "createdAt": datetime.fromtimestamp((image_path or video_path).stat().st_mtime).isoformat(),
+        }] if image_url else []),
+        "videoHistory": [{
+            "id": f"recovered_video_{index}",
+            "url": video_url,
+            "prompt": "",
+            "label": version_label,
+            "source": "local-folder",
+            "createdAt": datetime.fromtimestamp(video_path.stat().st_mtime).isoformat(),
+        }],
+        "recoveredFrom": str(video_path),
+    }
+
+
+def _memory_updated_at(memory: Any) -> int:
+    if not isinstance(memory, dict):
+        return 0
+    try:
+        return int(memory.get("updatedAt") or 0)
+    except Exception:
+        return 0
+
+
+def _load_product_memories(workbench: str = STORYBOARD_MODE_AD_FILM) -> dict[str, Any]:
+    memories = _load_product_memory_setting(PRODUCT_MEMORY_SETTING_KEY)
+    legacy_memories = _load_product_memory_setting(PRODUCT_SHOWCASE_MEMORY_SETTING_KEY)
+    for key, value in legacy_memories.items():
+        if not key or not isinstance(value, dict):
+            continue
+        current = memories.get(key)
+        if _memory_updated_at(value) >= _memory_updated_at(current):
+            memories[key] = value
+    return memories
+
+
+def _save_product_memories(memories: dict[str, Any], workbench: str = STORYBOARD_MODE_AD_FILM) -> None:
     items = [
         (key, value)
         for key, value in (memories or {}).items()
@@ -1026,6 +1171,83 @@ def _creative_route(seed: int) -> dict[str, str]:
     return routes[seed % len(routes)]
 
 
+def _product_showcase_route(seed: int) -> dict[str, str]:
+    routes = [
+        {
+            "name": "高级棚拍细节",
+            "visual": "干净商业棚拍光、深浅背景渐变、产品完整轮廓、微距扫光和材质纹理",
+            "tempo": "慢推、转台和焦点转移围绕产品本身展开",
+        },
+        {
+            "name": "湿石产品静物",
+            "visual": "湿润岩石台面、水珠、逆光高光、产品静置英雄主体和材质特写",
+            "tempo": "从水珠微距推进到鞋面、鞋底和完整海报式定格",
+        },
+        {
+            "name": "结构扫描大片",
+            "visual": "侧面结构、中底弧线、后跟支撑、包边和鞋底齿纹被电影级扫光掠过",
+            "tempo": "镜头沿结构慢速横移，最后回到完整产品主视觉",
+        },
+        {
+            "name": "轻量清爽电商",
+            "visual": "明亮留白、浅色台面、柔和自然光、轻微悬浮感和完整产品轮廓",
+            "tempo": "简洁、轻快、清爽，从轮廓到材质再到海报收束",
+        },
+    ]
+    return routes[seed % len(routes)]
+
+
+def _normalize_batch_strategy(raw: Any, work_index: int = 0) -> dict[str, str]:
+    source = raw if isinstance(raw, dict) else {}
+    label = _clean_text(str(source.get("label") or source.get("name") or ""), 80)
+    if not label:
+        label = f"差异化作品 {int(work_index or 0) + 1}"
+    return {
+        "id": _clean_text(str(source.get("id") or f"work_{int(work_index or 0) + 1}"), 80),
+        "label": label,
+        "primary_angle": _clean_text(str(source.get("primaryAngle") or source.get("primary_angle") or ""), 180),
+        "visual": _clean_text(str(source.get("visual") or ""), 260),
+        "tempo": _clean_text(str(source.get("tempo") or ""), 260),
+        "opening": _clean_text(str(source.get("opening") or ""), 180),
+        "scene_order": _clean_text(str(source.get("sceneOrder") or source.get("scene_order") or ""), 320),
+        "avoid": _clean_text(str(source.get("avoid") or ""), 220),
+    }
+
+
+def _batch_strategy_prompt_text(strategy: dict[str, str], work_index: int = 0) -> str:
+    if not strategy:
+        return ""
+    lines = [
+        f"批量作品编号：第 {int(work_index or 0) + 1} 条",
+        f"本条作品策略：{strategy.get('label') or ''}",
+    ]
+    if strategy.get("primary_angle"):
+        lines.append(f"主侧重点：{strategy['primary_angle']}")
+    if strategy.get("visual"):
+        lines.append(f"视觉路线：{strategy['visual']}")
+    if strategy.get("tempo"):
+        lines.append(f"节奏安排：{strategy['tempo']}")
+    if strategy.get("opening"):
+        lines.append(f"开场方式：{strategy['opening']}")
+    if strategy.get("scene_order"):
+        lines.append(f"分镜顺序建议：{strategy['scene_order']}")
+    if strategy.get("avoid"):
+        lines.append(f"本条避免：{strategy['avoid']}")
+    lines.append("必须让本条作品和其他批量作品在主卖点、开场、场景、机位、镜头速度、动作路径和收尾帧上明显不同。")
+    return "\n".join(lines)
+
+
+def _route_from_batch_strategy(strategy: dict[str, str], fallback: dict[str, str] | None = None) -> dict[str, str] | None:
+    if not strategy:
+        return fallback
+    fallback = fallback or {}
+    return {
+        "name": strategy.get("label") or fallback.get("name") or "批量差异化路线",
+        "visual": strategy.get("visual") or strategy.get("primary_angle") or fallback.get("visual") or "按本条批量策略建立不同视觉路线",
+        "tempo": strategy.get("tempo") or fallback.get("tempo") or "按本条批量策略调整镜头节奏",
+    }
+
+
 def _selling_point_ad_drama(title: str, detail: str = "") -> dict[str, str]:
     text = f"{title} {detail}"
     cases = [
@@ -1110,6 +1332,132 @@ def _selling_point_ad_drama(title: str, detail: str = "") -> dict[str, str]:
         "detail": "关键材质、结构、纹理和运动细节用电影级微距自然带出",
         "voiceover": f"{title}，随每一步自然发生。",
     }
+
+
+def _selling_point_showcase_drama(title: str, detail: str = "") -> dict[str, str]:
+    text = f"{title} {detail}"
+    cases = [
+        (
+            ("防滑", "不打滑", "抓地", "止滑", "湿滑"),
+            {
+                "scene": "湿润岩石质感台面、低角度自然逆光和浅水反光，但产品保持静物英雄主体",
+                "action": "镜头从鞋底齿纹和橡胶分区微距开始，缓慢滑过侧边轮廓，再回到完整鞋底结构",
+                "detail": "用齿纹深浅、分区边缘、水珠停留和橡胶质感表达抓地卖点",
+                "ending": "产品侧放在湿石台面上，鞋底纹路和侧面轮廓同时清晰，像品牌产品海报前一帧",
+                "voiceover": "抓地细节，看得见也靠得住。",
+            },
+        ),
+        (
+            ("防水", "拒水", "涉水", "泼水", "速干"),
+            {
+                "scene": "暗色岩石台面、柔和逆光、水珠和薄雾围绕产品形成高级户外棚拍质感",
+                "action": "镜头用微距扫过鞋面织物、包边和接缝，水珠沿表面缓慢滑落，产品本身不被穿着",
+                "detail": "用水珠滚落、材质反光和接缝结构表现拒水与速干质感",
+                "ending": "水珠停在鞋面和包边边缘，产品完整轮廓干净清晰",
+                "voiceover": "水珠滑落，清爽留在脚下。",
+            },
+        ),
+        (
+            ("透气", "干爽", "排汗", "不闷", "通风"),
+            {
+                "scene": "清晨自然光、干净浅色台面和轻微风感，背景有柔和虚化的户外空气感",
+                "action": "镜头贴近鞋面网布和织物层次，慢慢推过孔隙、拼接和内衬区域",
+                "detail": "用网眼纹理、织物层次、柔和风动和明亮光线表达透气干爽",
+                "ending": "产品三分之二侧面定格，鞋面纹理通透，整体轻盈干净",
+                "voiceover": "让透气感，从细节里出来。",
+            },
+        ),
+        (
+            ("缓震", "减震", "回弹", "软弹", "舒适"),
+            {
+                "scene": "柔和棚拍光与户外石材台面结合，产品中底成为画面重点",
+                "action": "镜头从鞋跟中底横向滑过，扫光掠过厚度、弧线和支撑层，轻微转台展示轮廓",
+                "detail": "用中底厚度、鞋跟弧线、材质层次和光影弹性质感表达缓震舒适",
+                "ending": "产品侧面完整定格，中底线条和鞋跟结构清楚可见",
+                "voiceover": "缓震层次，藏在每一道结构里。",
+            },
+        ),
+        (
+            ("支撑", "稳定", "包裹", "护踝", "不崴"),
+            {
+                "scene": "深色岩面和硬朗侧逆光，产品以侧视和后跟结构作为英雄主体",
+                "action": "镜头环绕后跟、鞋帮、包边和鞋带系统，强调结构连接与包裹轮廓",
+                "detail": "用后跟杯、鞋帮高度、包边转折和鞋带孔结构表达稳定支撑",
+                "ending": "产品后跟三分之二角度定格，支撑结构和侧面轮廓有力量感",
+                "voiceover": "稳定支撑，来自完整结构。",
+            },
+        ),
+        (
+            ("耐磨", "抗磨", "耐穿", "耐用", "结实"),
+            {
+                "scene": "粗粝岩石台面、微尘和低角度硬光，产品静置但质感硬朗",
+                "action": "镜头扫过鞋头包边、鞋底外缘、缝线和高磨损区域，慢速推近材质纹理",
+                "detail": "用包边厚度、橡胶边缘、缝线细节和微尘质感表达耐穿可靠",
+                "ending": "鞋头和鞋底边缘停在画面中心，纹理清晰，广告大片质感克制",
+                "voiceover": "耐用感，先从细节开始。",
+            },
+        ),
+        (
+            ("轻量", "轻便", "不累", "轻"),
+            {
+                "scene": "明亮浅色背景、自然侧光和少量户外材质元素，产品悬浮感或轻微转台展示",
+                "action": "镜头从产品轮廓线条和鞋身厚薄比例切入，轻缓环绕展示轻盈结构",
+                "detail": "用薄厚比例、鞋身线条、透光织物和干净留白表达轻量感",
+                "ending": "产品完整悬停或轻置在干净台面，轮廓清爽，空间感充足",
+                "voiceover": "轻量结构，让出发更轻松。",
+            },
+        ),
+    ]
+    for keywords, drama in cases:
+        if any(keyword in text for keyword in keywords):
+            return drama
+    return {
+        "scene": f"高级产品广告棚拍与克制户外材质台面结合，围绕“{title}”展示产品本身的结构和质感",
+        "action": f"镜头围绕产品完整轮廓、材质、结构和关键细节缓慢推进，让“{title}”通过产品本身被看见",
+        "detail": "用微距扫光、浅景深、材质纹理、结构转折和干净构图表达卖点",
+        "ending": "产品以完整英雄角度定格，主体清楚、无文字，方便过渡到结尾海报",
+        "voiceover": f"{title}，从产品细节里看见。",
+    }
+
+
+def _showcase_timeline_items(
+    raw: Any,
+    *,
+    name: str,
+    title: str,
+    detail: str,
+    duration: int,
+    drama: dict[str, str] | None = None,
+) -> list[str]:
+    drama = drama or _selling_point_showcase_drama(title, detail)
+    items: list[str] = []
+    if isinstance(raw, list):
+        for item in raw[:4]:
+            raw_desc = ""
+            if isinstance(item, dict):
+                time_label = _clean_text(str(item.get("time") or item.get("range") or ""), 20)
+                parts = [
+                    item.get("shot") or item.get("景别"),
+                    item.get("camera") or item.get("运镜"),
+                    item.get("action") or item.get("动作"),
+                    item.get("visual") or item.get("画面"),
+                    item.get("effect") or item.get("效果"),
+                ]
+                raw_desc = "，".join(str(part) for part in parts if part)
+            elif isinstance(item, str):
+                raw_desc = item
+            desc = _clean_text(_sanitize_storyboard_prompt_text(raw_desc), 260)
+            if desc and not _requires_wearing_scene(desc):
+                items.append(f"{time_label}：{desc}" if time_label else desc)
+    if items:
+        clean_items = [re.sub(r"^\s*[^：:]{1,24}[：:]\s*", "", item).strip() for item in items]
+        continuous_scene = "；".join(part for part in clean_items if part)
+        return [
+            f"0-{duration}秒：同一产品细节广告场景内连贯推进，{continuous_scene}；全程只拍{name}本身，不出现人穿着、真人脚腿、行走或使用动作；结尾回到产品完整英雄角度，为海报收束做衔接。",
+        ]
+    return [
+        f"0-{duration}秒：一个完整连贯的产品细节广告镜头，{drama['scene']}；全程只拍{name}本身，{drama['action']}；中后段用{drama['detail']}服务卖点“{title}”；结尾{drama['ending']}，画面干净、无字幕、无人物，方便后接产品海报。",
+    ]
 
 
 def _timeline_items(raw: Any, *, name: str, title: str, hook: str, detail: str, duration: int, drama: dict[str, str] | None = None) -> list[str]:
@@ -1241,6 +1589,100 @@ def _veo_storyboard_scene(
     }
 
 
+def _product_showcase_storyboard_scene(
+    product: ProductInput,
+    *,
+    index: int,
+    beat_name: str,
+    selling_point: str,
+    hook: str,
+    detail: str,
+    aspect_ratio: str,
+    duration: int,
+    image_frame: str = "",
+    timeline: Any = None,
+    sound: str = "",
+    voiceover: str = "",
+    ending_frame: str = "",
+    route: dict[str, str] | None = None,
+) -> dict[str, str]:
+    name = _clean_text(product.name, 80) or "产品"
+    title = _clean_text(selling_point, 80) or f"卖点 {index + 1}"
+    caption = _caption_text(hook, title)
+    drama = _selling_point_showcase_drama(title, detail)
+    route = route or {
+        "name": "产品细节大片",
+        "visual": "高级电商棚拍、户外材质台面、微距扫光、浅景深、干净产品英雄构图",
+        "tempo": "慢推、环绕、扫光和细节切换都服务同一个产品本身",
+    }
+    frame = _clean_text(
+        image_frame,
+        320,
+    )
+    if not frame or _requires_wearing_scene(frame):
+        frame = f"{beat_name}，{route['visual']}中，{name}作为唯一英雄主体静置或轻微转台展示，卖点“{title}”通过产品结构、材质、轮廓和细节被看见。"
+    ending = _clean_text(
+        ending_frame,
+        220,
+    )
+    if not ending or _requires_wearing_scene(ending):
+        ending = f"{drama['ending']}；{name}外观、材质、关键结构和比例清晰，画面干净无文字，可衔接产品海报。"
+    sound_design = _clean_text(
+        sound,
+        180,
+    )
+    if not sound_design or _requires_wearing_scene(sound_design) or _contains_legacy_storyboard_logic(sound_design):
+        sound_design = "现场音效：极轻微材质摩擦声、镜头氛围声、细微风声或水珠声；不要脚步声，不要背景音乐、BGM、配乐、音乐节奏或鼓点。"
+    voiceover_text = _clean_text(voiceover, 180) or drama["voiceover"]
+    if _contains_legacy_storyboard_logic(voiceover_text):
+        voiceover_text = drama["voiceover"]
+    timeline_lines = _showcase_timeline_items(
+        timeline,
+        name=name,
+        title=title,
+        detail=detail,
+        duration=duration,
+        drama=drama,
+    )
+    image_prompt = "\n".join([
+        "【用途】生成产品细节视频首帧 @图片1：高级电商产品广告大片的单张分镜图，作为后续视频生成首帧/视觉参考。",
+        f"【参考】产品外观完全以@产品参考图为准，保持{name}的轮廓、结构、比例、材质、鞋面/鞋底/扣具/纹理/logo位置等关键细节一致；外观细节不在文字里二次发挥。",
+        f"【画幅】{aspect_ratio}，电影级产品静物广告构图，产品是唯一英雄主体。",
+        f"【创意路线】{route['name']}：{route['visual']}，{route['tempo']}。",
+        f"【卖点气质】场景：{drama['scene']}；镜头：{drama['action']}；细节：{drama['detail']}。",
+        f"【首帧】{frame}",
+        "【质感】高级电商产品广告、真实商业摄影、浅景深、微距扫光、材质纹理、干净背景、克制户外材质台面或棚拍空间。",
+        "【画面要求】不要出现人穿着、真人脚腿、手拿、走路、奔跑、踩水或使用动作；不要字幕、文字、价格、促销词、按钮、水印或二维码；不要做对比、测评、实验化演示或硬性证明。",
+        f"【结尾帧】{ending}",
+    ])
+    video_prompt = "\n".join([
+        f"【技术参数】{aspect_ratio}，{duration}秒，24fps，高级电商产品细节广告大片，真实商业摄影质感，浅景深。",
+        f"【参考素材】@图片1为首帧、构图、光线、产品姿态和动作起点；整段视频只拍{name}本身。@产品参考图只用于保持{name}外观、结构、比例、材质、鞋面/鞋底/扣具/纹理/logo位置等关键细节一致，外观细节不在文字里二次发挥。",
+        f"【创意路线】{route['name']}：{route['visual']}，{route['tempo']}。",
+        f"【卖点表达】不要直白解释“{title}”，让它自然出现在产品本身的结构、材质、轮廓、微距细节、光影和质感中；画面要能承接后期旁白和字幕。",
+        "【时间戳分镜】",
+        *timeline_lines,
+        "【镜头节奏】这是一段完整连贯的产品细节广告镜头；可以通过慢推、微距横移、轻微环绕、转台、扫光、焦点转移和景别变化，从局部细节自然推进到完整产品英雄角度或海报式收束。",
+        f"【音效】{sound_design}",
+        "【声音限制】生成阶段不要旁白、配音、人声、口播、唱歌、吟唱、Rap、歌词化表达或音乐化念白；不要背景音乐、BGM、配乐、音乐节奏或鼓点，只保留极轻微真实现场音效。",
+        f"【禁止项】全片不要出现任何字幕、屏幕文字、价格、促销词、按钮、水印、二维码；不要出现人穿着、真人脚腿、行走、奔跑、踩水、使用场景动作、主播画面或直播带货口播；不要出现对比、测评、实验化演示、道具验证、硬性证明或测评感画面；只用产品静物、材质细节、光影和镜头运动表现“{caption}”。",
+        f"【结尾帧】{ending}",
+    ])
+    return {
+        "id": f"scene_{uuid.uuid4().hex[:8]}",
+        "title": f"{index + 1}. {beat_name}：{title}",
+        "selling_point": title,
+        "hook": caption,
+        "image_prompt": image_prompt,
+        "video_prompt": video_prompt,
+        "voiceover_text": voiceover_text,
+        "shot_notes": f"{beat_name}，约 {duration} 秒。参考产品图生成产品细节分镜图，再用分镜图作为 Veo 首帧。",
+        "storyboard_image_url": "",
+        "video_url": "",
+        "reference_mode": "product_showcase",
+    }
+
+
 def _scene_templates(
     product: ProductInput,
     point: SellingPoint,
@@ -1249,11 +1691,44 @@ def _scene_templates(
     duration: int,
     scene_count: int = DEFAULT_STORYBOARD_SCENE_COUNT,
     route: dict[str, str] | None = None,
+    storyboard_mode: str = STORYBOARD_MODE_AD_FILM,
 ) -> dict[str, str]:
     name = _clean_text(product.name, 80) or "产品"
     title = _clean_text(point.title, 80) or f"卖点 {index + 1}"
     detail = _clean_text(point.description or point.evidence, 180)
     product_lock_hint = " 产品完整形态已由产品详情表确认，必须保持同一产品结构、颜色、材质和比例，不要自行改款。" if product.detail_sheet_url else ""
+    route_name = (route or {}).get("name", "")
+    route_visual = (route or {}).get("visual", "")
+    route_tempo = (route or {}).get("tempo", "")
+    if storyboard_mode == STORYBOARD_MODE_PRODUCT_SHOWCASE:
+        if scene_count == VEO_STORYBOARD_SCENE_COUNT:
+            beat_pool = [
+                ("产品英雄开场", "完整轮廓先抓住视线"),
+                ("材质微距扫光", f"{title}从材质里看见"),
+                ("结构细节环绕", f"{title}藏在结构里"),
+                ("海报式收束", "回到完整产品主视觉"),
+            ]
+        else:
+            beat_pool = [
+                ("产品英雄开场", f"完整展示{name}轮廓、比例和主配色"),
+                ("鞋面材质微距", f"用纹理、织物、包边承接“{title}”"),
+                ("侧面结构扫光", f"展示{name}的结构层次和支撑轮廓"),
+                ("鞋底细节特写", f"用鞋底纹路和边缘细节表现“{title}”"),
+                ("轮廓转台展示", f"产品本身慢速环绕，保持高级电商质感"),
+                ("海报定格收束", f"回到{name}完整产品主视觉"),
+            ]
+        beat_name, hook = beat_pool[index % len(beat_pool)]
+        return _product_showcase_storyboard_scene(
+            product,
+            index=index,
+            beat_name=beat_name,
+            selling_point=title,
+            hook=hook,
+            detail=detail,
+            aspect_ratio=aspect_ratio,
+            duration=duration,
+            route=route,
+        )
     if scene_count == VEO_STORYBOARD_SCENE_COUNT:
         route_name = (route or {}).get("name", "")
         fallback_beats = {
@@ -1311,6 +1786,12 @@ def _scene_templates(
             route=route,
         )
     drama = _selling_point_ad_drama(title, detail)
+    if route_visual:
+        drama = {
+            **drama,
+            "scene": f"{route_visual}；{drama['scene']}",
+            "action": f"{route_tempo or hook}；{drama['action']}",
+        }
     scene_style = "真实产品广告大片，电影级户外/生活场景，产品为英雄主体，画面适合手机竖屏投放"
     if aspect_ratio == "16:9":
         scene_style = "真实产品广告大片横版视频，电影级户外/生活场景，产品为英雄主体，画面适合横版投放"
@@ -1333,13 +1814,13 @@ def _scene_templates(
         video_prompt += f" 卖点补充：{detail}。"
     return {
         "id": f"scene_{uuid.uuid4().hex[:8]}",
-        "title": f"{index + 1}. {beat_name}：{title}",
+        "title": f"{index + 1}. {beat_name}：{title}" if not route_name else f"{index + 1}. {route_name} · {beat_name}：{title}",
         "selling_point": title,
         "hook": hook,
         "image_prompt": image_prompt,
         "video_prompt": video_prompt,
         "voiceover_text": drama["voiceover"],
-        "shot_notes": f"{beat_name}，约 {duration} 秒，服务卖点：{title}。",
+        "shot_notes": f"{route_name + '，' if route_name else ''}{beat_name}，约 {duration} 秒，服务卖点：{title}。",
         "storyboard_image_url": "",
         "video_url": "",
     }
@@ -1357,6 +1838,9 @@ def _storyboard_prompt(
     creative_brief: str = "",
     creative_seed: str = "",
     regenerate_index: int = 0,
+    storyboard_mode: str = STORYBOARD_MODE_AD_FILM,
+    batch_strategy: dict[str, str] | None = None,
+    work_index: int = 0,
 ) -> str:
     name = _clean_text(product.name, 80) or "未命名产品"
     category = _clean_text(product.category, 80) or "电商产品"
@@ -1372,6 +1856,78 @@ def _storyboard_prompt(
         if storyboard_reference_count
         else "用户未额外上传分镜/场景参考图，请根据产品卖点和创意路线自行构思画面。"
     )
+    strategy = _normalize_batch_strategy(batch_strategy, work_index) if batch_strategy else {}
+    strategy_note = _batch_strategy_prompt_text(strategy, work_index)
+    if storyboard_mode == STORYBOARD_MODE_PRODUCT_SHOWCASE:
+        route = route or {
+            "name": "产品细节大片",
+            "visual": "高级电商棚拍、户外材质台面、微距扫光、浅景深、产品英雄构图",
+            "tempo": "用慢推、环绕、转台、扫光和焦点转移展示产品本身",
+        }
+        seed_text = creative_seed or uuid.uuid4().hex
+        if scene_count == VEO_STORYBOARD_SCENE_COUNT and duration == VEO_STORYBOARD_DURATION:
+            beat_description = "4 个分镜必须分别承担：产品完整轮廓开场、核心材质微距、结构/鞋底/细节卖点、海报式产品主视觉收束"
+        else:
+            beat_description = "默认 6 个分镜：产品完整轮廓开场、鞋面材质微距、侧面结构扫光、鞋底/关键细节特写、轮廓转台展示、海报式产品主视觉收束"
+        return f"""
+你是高级电商产品广告导演、商业摄影指导和 Veo/Seedance 视频提示词专家。请根据产品卖点，为同一个产品生成一条“纯产品细节展示”的广告大片分镜。
+
+产品名称：{name}
+产品类目：{category}
+产品补充信息：{description or "无"}
+画幅：{aspect_ratio}
+单个分镜时长：约 {duration} 秒
+产品一致性要求：{detail_sheet_note}
+分镜参考图要求：{storyboard_reference_note}
+本次创意路线：{route["name"]} - {route["visual"]}；节奏：{route["tempo"]}
+本次重生成编号：{regenerate_index}
+创意随机种子：{seed_text}
+用户创作需求：{creative_brief_text or f"请根据上面的卖点，为我写 {scene_count} 段 {duration}s 的纯产品细节广告视频，结尾也要像产品海报。"}
+{f"本条批量差异化要求：\n{strategy_note}" if strategy_note else ""}
+
+已整理/已编辑的卖点：
+{points_text or "无明确卖点，请基于产品信息生成保守的产品细节广告片卖点。"}
+
+核心方向：
+1. 这是“产品工作台”，不是穿着使用广告片。所有画面都必须只展示产品本身的细节、样式、结构、材质、轮廓和高级电商质感。
+2. 产品卖点与旧工作台一致，但表达方式必须改为产品本体展示：防滑拍鞋底齿纹/橡胶分区/湿石静物；防水拍鞋面水珠/包边/接缝；透气拍网眼/织物层次；支撑拍后跟/鞋帮/包边结构；缓震拍中底厚度和弧线；耐磨拍鞋头包边/鞋底外缘/缝线；轻量拍轮廓线条和留白。
+3. 严禁出现人穿着、真人脚、腿、身体部位、行走、奔跑、踩水、户外脚步运动、主播、直播间、购买界面、测试/测评/对比画面。
+4. 所有视频提示词都不能要求字幕、屏幕文字、价格、按钮、水印、二维码；voiceover 字段可以写最终合成用旁白，但不能写进 video_prompt。
+5. {beat_description}。
+6. 每个分镜必须是一个完整连贯的产品细节镜头，适合单独调用视频模型生成，再拼成一条完整产品广告视频。
+7. image_frame/image_prompt 必须描述首帧产品分镜图：产品英雄主体、静物构图、商业摄影光线、材质台面、微距/转台/扫光起点；产品外观由产品参考图锁定，不要在文字里二次发明外观。
+8. timeline/video_prompt 必须写清楚同一产品细节场景内的镜头推进：慢推、微距横移、轻微环绕、转台、扫光、焦点转移、从局部细节到完整产品英雄角度或海报式定格。
+9. sound 只允许极轻微材质声、镜头氛围声、风声或水珠声；不要脚步声、人声、背景音乐、BGM、配乐、鼓点。
+10. ending_frame 必须回到产品本身的完整英雄角度或海报式产品主视觉，方便后面接收尾海报。
+11. 每次重生成都必须明显更换细节顺序、机位、光线、台面材质、镜头运动和结尾帧，不要复用上一版分镜。
+12. 如果有“本条批量差异化要求”，必须优先执行该策略；不要生成和其他批量作品一样的场景顺序、开场、主卖点或镜头语言。
+13. 所有输出必须是中文。
+
+质量要求：
+- 提示词要具体，不要空泛写“高级质感”。要写到镜头距离、机位、材质、扫光、焦点、产品区域和收束方式。
+- 如果有分镜/场景参考图，只吸收其光线、构图、台面材质、镜头质感或广告风格；不要照搬参考图里的其他产品。
+- 每个分镜只围绕一个核心卖点气质，不要塞入多个不连续动作。
+- 产品一致性必须通过“@产品参考图”维持，JSON 里只写结构字段。
+
+只返回严格 JSON object，不要 Markdown，不要解释。格式：
+{{
+  "ad_concept": "一句话纯产品细节广告创意概念",
+  "scenes": [
+    {{
+      "title": "1. 产品英雄开场：短标题",
+      "selling_point": "对应卖点",
+      "hook": "6-10 字内部卖点钩子，不要作为画面字幕",
+      "image_frame": "首帧图片@图片1画面描述",
+      "timeline": [
+        {{"time": "0-{duration}秒", "shot": "景别", "camera": "运镜", "action": "同一产品静物场景内的镜头推进", "visual": "产品材质、结构、样式和海报式收束"}}
+      ],
+      "sound": "声音设计",
+      "voiceover": "一句中文旁白",
+      "ending_frame": "结尾帧描述"
+    }}
+  ]
+}}
+""".strip()
     if scene_count == VEO_STORYBOARD_SCENE_COUNT and duration == VEO_STORYBOARD_DURATION:
         route = route or {"name": "溪流广告大片", "visual": "溪流浅水、湿石、苔藓、水花慢动作、低机位跟拍", "tempo": "真实户外广告片，动作自然，卖点融进画面"}
         seed_text = creative_seed or uuid.uuid4().hex
@@ -1389,6 +1945,7 @@ def _storyboard_prompt(
 本次重生成编号：{regenerate_index}
 创意随机种子：{seed_text}
 用户创作需求：{creative_brief_text or f"请根据上面的卖点，为我写 {scene_count} 段 {duration}s 的电商广告视频；分镜图片和视频提示词都按 Seedance 风格生成。"}
+{f"本条批量差异化要求：\n{strategy_note}" if strategy_note else ""}
 
 已整理/已编辑的卖点：
 {points_text or "无明确卖点，请基于产品信息生成保守的产品广告片卖点。"}
@@ -1412,6 +1969,7 @@ def _storyboard_prompt(
 16. 所有输出必须是中文。
 17. 每次重生成都必须明显更换场景组合、镜头顺序、入场动作、卖点呈现方式和结尾帧，不要复用上一版分镜。优先沿“本次创意路线”构思。
 18. 必须优先满足“用户创作需求”；如果用户写了“6段5s”，就输出 6 个分镜、每个分镜围绕 5 秒节奏书写，除非当前视频模型有固定时长限制。
+19. 如果有“本条批量差异化要求”，必须优先按该策略组织整条广告：主卖点、场景、机位、开场动作、镜头速度和收尾帧都要和其他批量作品错开。
 
 质量要求：
 - 镜头语言必须具体且有大片感：低机位英雄跟拍、贴地运动近景、推镜头、横移、材质微距、手持轻微晃动、慢动作水花/尘土/水雾、逆光轮廓光。
@@ -1452,6 +2010,7 @@ def _storyboard_prompt(
 产品一致性要求：{detail_sheet_note}
 分镜参考图要求：{storyboard_reference_note}
 用户创作需求：{creative_brief_text or f"请根据上面的卖点，为我写 {scene_count} 段 {duration}s 的电商广告视频；分镜图片和视频提示词都按 Seedance 风格生成。"}
+{f"本条批量差异化要求：\n{strategy_note}" if strategy_note else ""}
 
 已整理/已编辑的卖点：
 {points_text or "无明确卖点，请基于产品信息生成保守的电商卖点分镜。"}
@@ -1466,7 +2025,8 @@ def _storyboard_prompt(
 7. 不要生成价格、促销词、二维码、水印、虚假认证、夸大医疗/功效承诺。
 8. 必须优先满足“用户创作需求”；如果用户写了“6段5s”，就输出 6 个分镜、每个分镜围绕 5 秒节奏书写；如果用户要求广告大片、电商广告、户外实测、生活方式等风格，要体现在 image_prompt 和 video_prompt 里。
 9. 不要使用“对比、反差、痛点、证明、证据、测试、挑战”作为分镜核心结构；不要出现实验化测评或道具验证画面；可以有真实路况和动作，但不要把它写成硬测评。
-10. 所有输出必须是中文。
+10. 如果有“本条批量差异化要求”，必须优先按该策略组织整条广告：每条批量作品都要有不同主卖点顺序、开场、场景、机位、镜头速度、动作路径和收尾帧。
+11. 所有输出必须是中文。
 
 只返回严格 JSON object，不要 Markdown，不要解释。格式：
 {{
@@ -1493,6 +2053,7 @@ def _normalize_storyboard_scenes(
     duration: int,
     aspect_ratio: str,
     route: dict[str, str] | None = None,
+    storyboard_mode: str = STORYBOARD_MODE_AD_FILM,
 ) -> list[dict[str, str]]:
     raw_scenes = payload.get("scenes") if isinstance(payload, dict) else payload
     if not isinstance(raw_scenes, list):
@@ -1504,6 +2065,28 @@ def _normalize_storyboard_scenes(
         title = _clean_text(_sanitize_storyboard_prompt_text(str(item.get("title") or item.get("name") or f"分镜 {index + 1}")), 100)
         selling_point = _clean_text(_sanitize_storyboard_prompt_text(str(item.get("selling_point") or item.get("sellingPoint") or item.get("point") or "")), 100)
         hook = _clean_text(_sanitize_storyboard_prompt_text(str(item.get("hook") or item.get("scene_hook") or "")), 180)
+        if storyboard_mode == STORYBOARD_MODE_PRODUCT_SHOWCASE:
+            beat_name = title.split("：", 1)[0].split(".", 1)[-1].strip() or f"分镜 {index + 1}"
+            scene = _product_showcase_storyboard_scene(
+                product,
+                index=index,
+                beat_name=beat_name,
+                selling_point=selling_point or title,
+                hook=hook or selling_point or title,
+                detail=_clean_text(str(item.get("detail") or item.get("description") or ""), 220),
+                aspect_ratio=aspect_ratio,
+                duration=duration,
+                image_frame=_sanitize_storyboard_prompt_text(str(item.get("image_frame") or item.get("imageFrame") or item.get("image_prompt") or item.get("imagePrompt") or "")),
+                timeline=item.get("timeline") or item.get("time_axis") or item.get("时间轴"),
+                sound=str(item.get("sound") or item.get("声音") or ""),
+                voiceover=str(item.get("voiceover") or item.get("narration") or item.get("旁白") or ""),
+                ending_frame=_sanitize_storyboard_prompt_text(str(item.get("ending_frame") or item.get("endingFrame") or "")),
+                route=route,
+            )
+            scenes.append(scene)
+            if len(scenes) >= count:
+                break
+            continue
         if count == VEO_STORYBOARD_SCENE_COUNT:
             beat_name = title.split("：", 1)[0].split(".", 1)[-1].strip() or f"分镜 {index + 1}"
             scene = _veo_storyboard_scene(
@@ -1528,7 +2111,8 @@ def _normalize_storyboard_scenes(
             continue
         image_prompt = _clean_text(_sanitize_storyboard_prompt_text(str(item.get("image_prompt") or item.get("imagePrompt") or item.get("storyboard_prompt") or "")), 1200)
         video_prompt = _normalize_video_prompt_sound(str(item.get("video_prompt") or item.get("videoPrompt") or item.get("prompt") or ""))
-        image_prompt = _ensure_wearing_image_prompt(image_prompt, video_prompt, hook, selling_point, title)
+        if storyboard_mode != STORYBOARD_MODE_PRODUCT_SHOWCASE:
+            image_prompt = _ensure_wearing_image_prompt(image_prompt, video_prompt, hook, selling_point, title)
         voiceover_text = _clean_text(str(item.get("voiceover") or item.get("voiceover_text") or item.get("voiceoverText") or item.get("narration") or item.get("旁白") or ""), 180)
         if not voiceover_text or _contains_legacy_storyboard_logic(voiceover_text):
             voiceover_text = _selling_point_ad_drama(selling_point or title, "").get("voiceover", "")
@@ -1576,6 +2160,9 @@ async def _generate_model_storyboard(
         creative_brief=req.creative_brief,
         creative_seed=req.creative_seed,
         regenerate_index=req.regenerate_index,
+        storyboard_mode=req.storyboard_mode,
+        batch_strategy=_normalize_batch_strategy(req.batch_strategy, req.work_index) if req.batch_strategy else None,
+        work_index=req.work_index,
     )
     text = await _ark_chat_completion(prompt, model=model, max_tokens=4200)
     parsed = _parse_selling_points_json(text)
@@ -1586,6 +2173,7 @@ async def _generate_model_storyboard(
         duration=duration,
         aspect_ratio=req.aspect_ratio,
         route=route,
+        storyboard_mode=req.storyboard_mode,
     )
     if len(scenes) < count:
         raise RuntimeError("豆包 Seed 2.0 Pro 未返回足够可解析的分镜 JSON。")
@@ -1782,8 +2370,12 @@ def _prepare_video_segment_sync(
     end = max(0.0, float(end_time or 0.0)) if end_time is not None else 0.0
     duration = end - start if end > start else 0.0
     safe_rate = _safe_playback_rate(playback_rate)
+    trim_filter = f"trim=start={start:.3f}"
+    if duration > 0:
+        trim_filter += f":duration={duration:.3f}"
     video_filter = (
-        f"setpts=PTS/{safe_rate:.4f},"
+        f"{trim_filter},"
+        f"setpts=(PTS-STARTPTS)/{safe_rate:.4f},"
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
         "setsar=1,fps=30"
@@ -1804,16 +2396,8 @@ def _prepare_video_segment_sync(
     cmd = [
         ffmpeg,
         "-y",
-    ]
-    if start > 0:
-        cmd.extend(["-ss", f"{start:.3f}"])
-    if duration > 0:
-        cmd.extend(["-t", f"{duration:.3f}"])
-    cmd.extend([
         "-i",
         str(input_path),
-    ])
-    cmd.extend([
         "-vf",
         video_filter,
         "-c:v",
@@ -1826,7 +2410,7 @@ def _prepare_video_segment_sync(
         "yuv420p",
         "-an",
         str(output_path),
-    ])
+    ]
     _run_ffmpeg(cmd)
 
 
@@ -1982,14 +2566,24 @@ def _concat_audio_sync(ffmpeg: str, audio_paths: list[Path], list_path: Path, ou
 
 
 def _fit_audio_to_duration_sync(ffmpeg: str, input_path: Path, output_path: Path, duration: float | None) -> None:
+    safe_duration = float(duration or 0.0)
+    input_duration = _media_duration_seconds_sync(ffmpeg, input_path) if safe_duration > 0.1 else 0.0
+    audio_filter = ""
+    if safe_duration > 0.1 and input_duration and input_duration > safe_duration + 0.04:
+        speed_rate = max(1.0, min(1.28, input_duration / safe_duration))
+        audio_filter = _atempo_filter_chain(speed_rate)
+    elif safe_duration > 0.1:
+        audio_filter = "apad"
     cmd = [
         ffmpeg,
         "-y",
         "-i",
         str(input_path),
     ]
-    if duration and duration > 0.1:
-        cmd.extend(["-af", "apad", "-t", f"{float(duration):.3f}"])
+    if safe_duration > 0.1:
+        if audio_filter:
+            cmd.extend(["-af", audio_filter])
+        cmd.extend(["-t", f"{safe_duration:.3f}"])
     cmd.extend([
         "-c:a",
         "aac",
@@ -2125,27 +2719,127 @@ def _voiceover_char_budget(duration: float, speed_ratio: float | None) -> int:
     return max(6, min(120, int(max(0.6, target - 0.2) * 4.6 * max(0.6, min(1.4, speed)))))
 
 
+def _voiceover_char_range_for_duration(duration: float, speed_ratio: float | None) -> tuple[int, int]:
+    try:
+        target = float(duration or 0.0)
+    except (TypeError, ValueError):
+        target = 0.0
+    try:
+        speed = float(speed_ratio or 1.0)
+    except (TypeError, ValueError):
+        speed = 1.0
+    if not math.isfinite(speed) or speed <= 0:
+        speed = 1.0
+    chars_per_second = 4.6 * max(0.6, min(1.4, speed))
+    min_chars = int(max(0.6, target - 0.55) * chars_per_second)
+    max_chars = int(max(0.8, target - 0.12) * chars_per_second)
+    return max(6, min(110, min_chars)), max(8, min(130, max_chars))
+
+
+def _voiceover_duration_window(duration: float) -> tuple[float, float]:
+    try:
+        target = float(duration or 0.0)
+    except (TypeError, ValueError):
+        target = 0.0
+    if target <= 0:
+        return 0.0, 0.0
+    tolerance_before = min(0.18, max(0.08, target * 0.03))
+    return max(0.2, target - tolerance_before), target + 0.06
+
+
+def _voiceover_duration_distance(duration: float | None, target: float) -> float:
+    try:
+        value = float(duration or 0.0)
+        target_value = float(target or 0.0)
+    except (TypeError, ValueError):
+        return 999.0
+    if value <= 0 or target_value <= 0:
+        return 999.0
+    return abs(value - target_value)
+
+
+def _complete_voiceover_sentence(text: str) -> str:
+    cleaned = _clean_text(text, 180).strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"[\s，,。；;、：:…\.]+$", "", cleaned).strip()
+    if not cleaned:
+        return ""
+    if cleaned[-1] not in "。！？.!?":
+        cleaned = f"{cleaned}。"
+    return cleaned
+
+
 def _shorten_voiceover_locally(text: str, max_chars: int) -> str:
-    cleaned = _clean_text(text, 180)
-    if not cleaned or _voiceover_character_count(cleaned) <= max_chars:
+    safe_max_chars = max(4, int(max_chars or 0))
+    cleaned = _complete_voiceover_sentence(text)
+    if not cleaned or _voiceover_character_count(cleaned) <= safe_max_chars:
         return cleaned
     parts = [part.strip(" ，,。；;、") for part in re.split(r"[，,。；;、\n]+", cleaned) if part.strip()]
     selected: list[str] = []
-    current = 0
     for part in parts:
-        part_count = _voiceover_character_count(part)
-        if selected and current + part_count > max_chars:
-            break
-        if not selected and part_count > max_chars:
-            selected.append(part[:max_chars])
-            current = max_chars
+        candidate = "，".join([*selected, part])
+        if _voiceover_character_count(candidate) > safe_max_chars:
             break
         selected.append(part)
-        current += part_count
-        if current >= max_chars:
-            break
-    value = "，".join(selected).strip(" ，,。；;、") or cleaned[:max_chars]
-    return f"{value}。"
+    if not selected:
+        compact = re.sub(
+            r"(真的|其实|就是|非常|特别|可以|能够|我们|这款|这个|整体来说|在户外场景里|给人感觉)",
+            "",
+            parts[0] if parts else cleaned,
+        )
+        compact = compact.strip(" ，,。；;、")
+        keyword_fallbacks = [
+            (("Vibram", "抓地", "防滑", "大底"), "抓地更稳，湿滑路面也放心。"),
+            (("防水", "拒水", "水珠", "潮湿"), "防水拒水，湿地行动更从容。"),
+            (("透气", "干爽", "网布"), "透气干爽，长时间穿也舒服。"),
+            (("缓震", "回弹", "脚感"), "缓震回弹，每一步更轻松。"),
+            (("支撑", "稳定", "包裹"), "稳定包裹，复杂路面更安心。"),
+            (("耐磨", "耐用", "可靠"), "耐磨可靠，走得更远。"),
+            (("轻量", "轻便", "轻"), "轻量上脚，行动更轻松。"),
+        ]
+        for keywords, fallback in keyword_fallbacks:
+            if any(keyword in cleaned for keyword in keywords) and _voiceover_character_count(fallback) <= safe_max_chars + 4:
+                return fallback
+        if _voiceover_character_count(compact) > safe_max_chars:
+            return cleaned
+        return _complete_voiceover_sentence(compact)
+    return _complete_voiceover_sentence("，".join(selected))
+
+
+def _expand_voiceover_locally(text: str, min_chars: int, max_chars: int, product_name: str = "") -> str:
+    cleaned = _complete_voiceover_sentence(text)
+    if not cleaned:
+        return ""
+    safe_min_chars = max(6, int(min_chars or 0))
+    safe_max_chars = max(safe_min_chars + 2, int(max_chars or safe_min_chars + 16))
+    if _voiceover_character_count(cleaned) >= safe_min_chars:
+        return cleaned
+    base = re.sub(r"[。！？.!?]+$", "", cleaned).strip()
+    expansions: list[str] = []
+    if any(keyword in cleaned for keyword in ("Vibram", "抓地", "防滑", "大底")):
+        expansions.extend(["湿滑路面也更从容", "每一步都更稳"])
+    if any(keyword in cleaned for keyword in ("防水", "拒水", "水珠", "潮湿")):
+        expansions.extend(["潮湿环境里也保持清爽", "细节里看得见安全感"])
+    if any(keyword in cleaned for keyword in ("透气", "干爽", "网布")):
+        expansions.extend(["长时间穿着也更舒服", "细节里透出轻爽感"])
+    if any(keyword in cleaned for keyword in ("缓震", "回弹", "脚感")):
+        expansions.extend(["落地更轻，走得更远", "脚感自然更轻松"])
+    if any(keyword in cleaned for keyword in ("支撑", "稳定", "包裹")):
+        expansions.extend(["复杂路面也更安心", "让脚步保持稳定"])
+    if any(keyword in cleaned for keyword in ("耐磨", "耐用", "可靠")):
+        expansions.extend(["陪你走得更远", "经得起户外考验"])
+    expansions.extend(["让卖点在画面里自然发生", "细节越近，质感越清楚", "画面停留，力量感也留下"])
+    current = base
+    for phrase in expansions:
+        if phrase in current:
+            continue
+        candidate = _complete_voiceover_sentence(f"{current}，{phrase}")
+        if _voiceover_character_count(candidate) <= safe_max_chars + 4:
+            current = re.sub(r"[。！？.!?]+$", "", candidate).strip()
+            if _voiceover_character_count(candidate) >= safe_min_chars:
+                return candidate
+    return _complete_voiceover_sentence(current)
 
 
 def _extract_voiceover_from_model_response(text: str) -> str:
@@ -2168,7 +2862,157 @@ def _extract_voiceover_from_model_response(text: str) -> str:
             if value:
                 return _clean_text(str(value), 180)
     cleaned = re.sub(r"^旁白[:：]\s*", "", raw)
-    return _clean_text(cleaned, 180)
+    return _complete_voiceover_sentence(cleaned)
+
+
+def _split_voiceover_units(text: str) -> list[str]:
+    return [
+        _complete_voiceover_sentence(part)
+        for part in re.split(r"[。！？!?；;\n]+", text or "")
+        if _clean_text(part, 120)
+    ]
+
+
+def _dedupe_voiceover_texts(texts: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        cleaned = _complete_voiceover_sentence(text)
+        key = re.sub(r"[\W_]+", "", cleaned).lower()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return result
+
+
+def _extract_voiceover_plan_from_model_response(text: str) -> list[str]:
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw, flags=re.IGNORECASE)
+    candidates = [fenced.group(1).strip()] if fenced else []
+    json_match = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", raw)
+    if json_match:
+        candidates.append(json_match.group(1))
+    candidates.append(raw)
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except Exception:
+            continue
+        values: list[Any] = []
+        if isinstance(data, dict):
+            values = data.get("segments") or data.get("voiceovers") or data.get("旁白") or []
+            if isinstance(values, str):
+                values = _split_voiceover_units(values)
+        elif isinstance(data, list):
+            values = data
+        texts: list[str] = []
+        for value in values or []:
+            if isinstance(value, dict):
+                raw_text = value.get("voiceover") or value.get("text") or value.get("旁白") or ""
+            else:
+                raw_text = str(value or "")
+            cleaned = _complete_voiceover_sentence(raw_text)
+            if cleaned:
+                texts.append(cleaned)
+        if texts:
+            return texts
+    return _split_voiceover_units(raw)
+
+
+def _local_final_voiceover_plan(
+    segments: list[FinalVideoSegment],
+    *,
+    product_name: str,
+    selling_points: list[str],
+) -> list[str]:
+    point_pool = _dedupe_voiceover_texts([
+        *(selling_points or []),
+        *[item.voiceover_text or item.subtitle or item.title for item in segments],
+        *[item.title for item in segments],
+    ])
+    fallback_stems = [
+        f"{product_name}把稳定感交给每一步" if product_name else "把稳定感交给每一步",
+        "湿滑和碎石路面，也能稳稳向前",
+        "细节贴近脚步，支撑和抓地自然跟上",
+        "从山路到日常户外，都保持轻松可靠",
+        f"{product_name}，让出发更有底气" if product_name else "让出发更有底气",
+    ]
+    source = point_pool + fallback_stems
+    result: list[str] = []
+    used: set[str] = set()
+    for index, item in enumerate(segments):
+        base = source[index % len(source)] if source else fallback_stems[index % len(fallback_stems)]
+        cleaned = re.sub(r"^\d+[.、]\s*", "", base).strip()
+        cleaned = re.sub(r"[。！？!?；;]+$", "", cleaned)
+        if index == 0 and product_name and product_name not in cleaned:
+            cleaned = f"{product_name}，{cleaned}"
+        elif index == len(segments) - 1:
+            cleaned = cleaned if product_name and product_name in cleaned else f"{cleaned}，最后回到产品本身"
+        key = re.sub(r"[\W_]+", "", cleaned).lower()
+        if key in used:
+            cleaned = fallback_stems[index % len(fallback_stems)]
+            key = re.sub(r"[\W_]+", "", cleaned).lower()
+        used.add(key)
+        result.append(_complete_voiceover_sentence(cleaned))
+    return result[:len(segments)]
+
+
+async def _build_final_voiceover_plan(
+    segments: list[FinalVideoSegment],
+    *,
+    product_name: str,
+    product_description: str = "",
+    selling_points: list[str] | None = None,
+    style: str = "",
+    speed_ratio: float | None = None,
+) -> list[str]:
+    if not segments:
+        return []
+    selling_points = [_clean_text(item, 120) for item in (selling_points or []) if _clean_text(item, 120)]
+    duration_rows: list[str] = []
+    for index, item in enumerate(segments, start=1):
+        duration = _segment_clip_duration(item)
+        title = _clean_text(item.title or item.voiceover_text or item.subtitle, 120)
+        reference = _clean_text(item.voiceover_text or item.subtitle or item.title, 140)
+        duration_rows.append(f"{index}. 时长约{duration:.1f}秒；画面/卖点：{title}；原旁白参考：{reference}")
+    prompt = f"""
+你是电商广告大片旁白导演。请根据下面的混剪片段，写一条完整、连贯、不重复的中文广告旁白，并拆成 {len(segments)} 段，顺序对应视频片段。
+
+产品名称：{product_name or "未命名产品"}
+产品补充信息：{product_description or "无"}
+核心卖点：{"；".join(selling_points) if selling_points else "参考片段标题和原旁白"}
+整体风格：{style or "高级户外电商广告片，克制、有画面感、有完整起承转合"}
+语速参考：普通话自然广告旁白，speed_ratio={speed_ratio or 1.0}
+
+片段列表：
+{chr(10).join(duration_rows)}
+
+要求：
+1. 输出必须是同一条广告片的完整旁白，不是每个分镜各说各的。
+2. 每段必须是一句完整自然的话，不能突然断掉。
+3. 不要重复同一句、同一个短语或同一个卖点；每段承担不同作用：开场、场景证明、细节证明、收束。
+4. 旁白要贴合片段时长，短片段就更短，不要硬塞长句。
+5. 不要主播口播、不要直播间、不要购买引导、不要价格促销。
+6. 只返回 JSON：{{"segments":[{{"voiceover":"第一段完整旁白"}},{{"voiceover":"第二段完整旁白"}}]}}
+"""
+    try:
+        raw = await _ark_chat_completion(prompt, model=ARK_MODEL_ID, max_tokens=900)
+        planned = _dedupe_voiceover_texts(_extract_voiceover_plan_from_model_response(raw))
+    except Exception:
+        planned = []
+    if len(planned) < len(segments):
+        fallback = _local_final_voiceover_plan(segments, product_name=product_name, selling_points=selling_points)
+        planned = _dedupe_voiceover_texts([*planned, *fallback])
+    if len(planned) < len(segments):
+        planned = _local_final_voiceover_plan(segments, product_name=product_name, selling_points=selling_points)
+    planned = _dedupe_voiceover_texts(planned)
+    if len(planned) < len(segments):
+        fallback = _local_final_voiceover_plan(segments, product_name=product_name, selling_points=selling_points)
+        planned = _dedupe_voiceover_texts([*planned, *fallback])
+    return planned[:len(segments)]
 
 
 async def _rewrite_voiceover_for_duration(
@@ -2177,29 +3021,45 @@ async def _rewrite_voiceover_for_duration(
     target_duration: float,
     product_name: str,
     speed_ratio: float | None,
+    mode: str = "fit",
 ) -> str:
-    max_chars = _voiceover_char_budget(target_duration, speed_ratio)
-    local = _shorten_voiceover_locally(text, max_chars)
-    if _voiceover_duration_estimate(text, speed_ratio) <= target_duration + 0.25:
-        return _clean_text(text, 180)
+    min_chars, max_chars = _voiceover_char_range_for_duration(target_duration, speed_ratio)
+    current_estimate = _voiceover_duration_estimate(text, speed_ratio)
+    min_duration, max_duration = _voiceover_duration_window(target_duration)
+    if min_duration <= current_estimate <= max_duration:
+        return _complete_voiceover_sentence(text)
+    if current_estimate > max_duration:
+        local = _shorten_voiceover_locally(text, max_chars)
+        direction = "压缩"
+    else:
+        local = _expand_voiceover_locally(text, min_chars, max_chars, product_name)
+        direction = "补足"
     prompt = f"""
-你是电商广告片旁白剪辑师。请把下面旁白精简到约 {target_duration:.1f} 秒内，适合快节奏产品广告。
+你是电商广告片旁白剪辑师。请把下面旁白按同一个意思改写到接近 {target_duration:.1f} 秒，适合和当前画面片段精确对齐。
 
 产品名称：{product_name or "未命名产品"}
-最大字数：{max_chars} 个中文字符左右
+当前处理：{direction}
+建议字数：{min_chars}-{max_chars} 个中文字符
 原旁白：{text}
 
 要求：
-1. 只保留核心卖点和画面情绪，不要新增事实。
-2. 语气像广告大片旁白，短、利落、有节奏。
-3. 不要字幕说明，不要主播口播腔。
-4. 只返回 JSON：{{"voiceover":"精简后的旁白"}}
+1. 保持原意、核心卖点和产品承诺，不要换卖点，不要新增未经提供的事实。
+2. 如果原旁白过长，用同义简化、合并表达，不要直接删成信息残缺的短句。
+3. 如果原旁白过短，在不改变卖点的前提下补一点画面感、质感或节奏词，让它更贴近目标时长。
+4. 必须是一句或两句完整的话，不能像被剪断，结尾要自然收束。
+5. 语气像广告大片旁白，干净、克制、有节奏。
+6. 不要字幕说明，不要主播口播腔，不要促销购买引导。
+7. 只返回 JSON：{{"voiceover":"改写后的完整旁白"}}
 """
     try:
         raw = await _ark_chat_completion(prompt, model=ARK_MODEL_ID, max_tokens=180)
         candidate = _extract_voiceover_from_model_response(raw)
         if candidate:
-            return _shorten_voiceover_locally(candidate, max_chars + 4)
+            if _voiceover_duration_estimate(candidate, speed_ratio) > max_duration + 0.2:
+                return _shorten_voiceover_locally(candidate, max_chars)
+            if _voiceover_duration_estimate(candidate, speed_ratio) < min_duration - 0.1:
+                return _expand_voiceover_locally(candidate, min_chars, max_chars, product_name)
+            return _complete_voiceover_sentence(candidate)
     except Exception:
         pass
     return local
@@ -2275,17 +3135,15 @@ def _extract_segment_audio_sync(
 ) -> None:
     safe_duration = max(0.1, float(duration or 0.1))
     start = max(0.0, float(start_time or 0.0))
-    cmd = [ffmpeg, "-y"]
-    if start > 0:
-        cmd.extend(["-ss", f"{start:.3f}"])
+    cmd = [ffmpeg, "-y", "-i", str(input_path)]
     raw_duration = safe_duration * _safe_playback_rate(playback_rate)
+    audio_filter = f"atrim=start={start:.3f}"
     if raw_duration > 0:
-        cmd.extend(["-t", f"{raw_duration:.3f}"])
-    cmd.extend(["-i", str(input_path), "-t", f"{safe_duration:.3f}"])
+        audio_filter += f":duration={raw_duration:.3f}"
     cmd.extend([
         "-vn",
         "-af",
-        f"{_atempo_filter_chain(playback_rate)},apad",
+        f"{audio_filter},asetpts=PTS-STARTPTS,{_atempo_filter_chain(playback_rate)},apad",
         "-t",
         f"{safe_duration:.3f}",
         "-c:a",
@@ -2505,8 +3363,9 @@ async def list_batch_video_models():
 
 
 @router.get("/draft")
-async def get_workbench_draft():
-    raw = db.get_user_setting(WORKBENCH_DRAFT_SETTING_KEY, "")
+async def get_workbench_draft(workbench: str = STORYBOARD_MODE_AD_FILM):
+    setting_key = PRODUCT_VIDEO_WORKBENCH_DRAFT_SETTING_KEY if workbench == STORYBOARD_MODE_PRODUCT_SHOWCASE else WORKBENCH_DRAFT_SETTING_KEY
+    raw = db.get_user_setting(setting_key, "")
     if not raw:
         return {"draft": None, "updatedAt": 0}
     try:
@@ -2522,31 +3381,68 @@ async def get_workbench_draft():
 
 
 @router.put("/draft")
-async def save_workbench_draft(req: WorkbenchDraftRequest):
+async def save_workbench_draft(req: WorkbenchDraftRequest, workbench: str = STORYBOARD_MODE_AD_FILM):
     draft = dict(req.draft or {})
     draft["updatedAt"] = int(draft.get("updatedAt") or datetime.now(timezone.utc).timestamp() * 1000)
+    setting_key = PRODUCT_VIDEO_WORKBENCH_DRAFT_SETTING_KEY if workbench == STORYBOARD_MODE_PRODUCT_SHOWCASE else WORKBENCH_DRAFT_SETTING_KEY
     db.set_user_setting(
-        WORKBENCH_DRAFT_SETTING_KEY,
+        setting_key,
         json.dumps(draft, ensure_ascii=False, separators=(",", ":")),
     )
     return {"ok": True, "updatedAt": draft["updatedAt"]}
 
 
+@router.post("/recover-local-assets")
+async def recover_local_assets(req: LocalAssetRecoveryRequest):
+    try:
+        folder = _safe_recovery_folder(req.folder_path)
+    except ValueError as exc:
+        return {
+            "status": "failed",
+            "scenes": [],
+            "message": str(exc),
+        }
+    images, videos = _recoverable_asset_files(folder, req.limit)
+    if not videos:
+        return {
+            "status": "needs_video",
+            "scenes": [],
+            "image_count": len(images),
+            "video_count": 0,
+            "message": "这个文件夹里没有找到可恢复的视频文件。",
+        }
+    pairs = _pair_images_to_videos(images, videos)
+    scenes = [
+        _build_recovered_scene(video, pairs.get(video), index, req.product_name)
+        for index, video in enumerate(videos)
+    ]
+    return {
+        "status": "ready",
+        "folder_path": str(folder),
+        "scenes": scenes,
+        "image_count": len(images),
+        "video_count": len(videos),
+        "paired_count": len([scene for scene in scenes if scene.get("storyboard_image_url")]),
+        "message": f"已从本地素材文件夹恢复 {len(scenes)} 条视频分镜。",
+    }
+
+
 @router.get("/product-memory")
-async def get_product_memory(request: Request, product_name: str = ""):
+async def get_product_memory(request: Request, product_name: str = "", workbench: str = STORYBOARD_MODE_AD_FILM):
+    workbench = _workbench_mode(workbench)
     key = _product_memory_key(product_name)
     if not key:
         return {"found": False, "memory": None, "updatedAt": 0}
-    memories = _load_product_memories()
+    memories = _load_product_memories(workbench)
     memory = memories.get(key)
-    cloud_memory = await _fetch_cloud_product_memory(product_name, request)
+    cloud_memory = await _fetch_cloud_product_memory(product_name, request, workbench)
     cloud_url, _cloud_token = _cloud_sync_config()
     if isinstance(cloud_memory, dict):
         cloud_memory = _rewrite_memory_file_urls_for_cloud(cloud_memory, cloud_url)
         if int(cloud_memory.get("updatedAt") or 0) > int((memory or {}).get("updatedAt") or 0):
             memory = cloud_memory
             memories[key] = cloud_memory
-            _save_product_memories(memories)
+            _save_product_memories(memories, workbench)
     if not isinstance(memory, dict):
         return {"found": False, "memory": None, "updatedAt": 0}
     return {
@@ -2557,7 +3453,8 @@ async def get_product_memory(request: Request, product_name: str = ""):
 
 
 @router.put("/product-memory")
-async def save_product_memory(req: ProductMemoryRequest, request: Request):
+async def save_product_memory(req: ProductMemoryRequest, request: Request, workbench: str = STORYBOARD_MODE_AD_FILM):
+    workbench = _workbench_mode(workbench)
     product_name = _clean_text(req.product_name or req.memory.get("productName", ""), 100)
     key = _product_memory_key(product_name)
     if not key:
@@ -2565,10 +3462,10 @@ async def save_product_memory(req: ProductMemoryRequest, request: Request):
     memory = _normalize_product_memory(req.memory or {}, product_name)
     if not _is_cloud_forwarded_request(request):
         memory["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
-    memories = _load_product_memories()
+    memories = _load_product_memories(workbench)
     memories[key] = memory
-    _save_product_memories(memories)
-    synced = await _push_cloud_product_memory(product_name, memory, request)
+    _save_product_memories(memories, workbench)
+    synced = await _push_cloud_product_memory(product_name, memory, request, workbench)
     return {"ok": True, "updatedAt": memory["updatedAt"], "memory": memory, "cloudSynced": synced}
 
 
@@ -2774,13 +3671,16 @@ async def generate_selling_points(req: SellingPointsRequest):
 @router.post("/storyboard-plan")
 async def build_storyboard_plan(req: StoryboardPlanRequest):
     is_veo = _is_fixed_eight_second_model(req.video_model or "")
+    storyboard_mode = STORYBOARD_MODE_PRODUCT_SHOWCASE if req.storyboard_mode == STORYBOARD_MODE_PRODUCT_SHOWCASE else STORYBOARD_MODE_AD_FILM
     brief_count, brief_duration = _parse_storyboard_creative_brief(req.creative_brief)
     requested_count = brief_count if brief_count else int(req.variant_count or DEFAULT_STORYBOARD_SCENE_COUNT)
     requested_duration = brief_duration if brief_duration else int(req.duration or 5)
     count = VEO_STORYBOARD_SCENE_COUNT if is_veo else max(1, min(requested_count, 12))
     duration = VEO_STORYBOARD_DURATION if is_veo else max(4, min(requested_duration, 15))
     seed_value = _storyboard_seed(req)
-    route = _creative_route(seed_value) if is_veo else None
+    batch_strategy = _normalize_batch_strategy(req.batch_strategy, req.work_index) if req.batch_strategy else {}
+    route = _product_showcase_route(seed_value) if storyboard_mode == STORYBOARD_MODE_PRODUCT_SHOWCASE else (_creative_route(seed_value) if is_veo else None)
+    route = _route_from_batch_strategy(batch_strategy, route) if batch_strategy else route
     raw_points = req.selling_points or [
         SellingPoint(**point) for point in _fallback_selling_points(req.product, "")
     ]
@@ -2793,19 +3693,33 @@ async def build_storyboard_plan(req: StoryboardPlanRequest):
         scenes = []
         for index in range(count):
             point = raw_points[index % len(raw_points)]
-            scenes.append(_scene_templates(req.product, point, index, req.aspect_ratio, duration, count, route=route))
+            scenes.append(_scene_templates(
+                req.product,
+                point,
+                index,
+                req.aspect_ratio,
+                duration,
+                count,
+                route=route,
+                storyboard_mode=storyboard_mode,
+            ))
         warnings.append(f"豆包 Seed 2.0 Pro 生成分镜失败，已返回本地 {count} 分镜草稿：{str(exc)[:180]}")
     route_text = f"创意路线：{route['name']}；" if route else ""
-    warnings.append(f"{route_text}已按卖点生成 {count} 个分镜；每个分镜约 {duration} 秒，可继续编辑图片提示词和视频提示词。")
+    strategy_text = f"批量策略：{batch_strategy['label']}；" if batch_strategy else ""
+    mode_text = "纯产品细节" if storyboard_mode == STORYBOARD_MODE_PRODUCT_SHOWCASE else "广告大片"
+    warnings.append(f"{strategy_text}{route_text}已按卖点生成 {count} 个{mode_text}分镜；每个分镜约 {duration} 秒，可继续编辑图片提示词和视频提示词。")
     return {
         "status": "ready",
         "mode": mode,
         "language_model": req.language_model,
         "image_model": req.image_model,
         "video_model": req.video_model,
+        "storyboard_mode": storyboard_mode,
         "aspect_ratio": req.aspect_ratio,
         "duration": duration,
         "creative_route": route,
+        "batch_strategy": batch_strategy,
+        "work_index": req.work_index,
         "creative_seed": req.creative_seed,
         "regenerate_index": req.regenerate_index,
         "scenes": scenes,
@@ -2931,6 +3845,7 @@ async def compose_final_video(req: ComposeFinalVideoRequest):
     voiceover_audio_count = 0
     poster_duration_used = poster_duration if poster_image_path else 0.0
     rhythm_adjustments: list[dict[str, Any]] = []
+    final_voiceover_plan: list[str] = []
 
     if should_voiceover and not voiceover_api_key:
         return {
@@ -2999,7 +3914,7 @@ async def compose_final_video(req: ComposeFinalVideoRequest):
                 await asyncio.to_thread(_mux_video_audio_sync, ffmpeg, video_only_path, voiceover_path, final_path)
 
     async def _compose_async_v2() -> None:
-        nonlocal voiceover_audio_count, poster_duration_used
+        nonlocal voiceover_audio_count, poster_duration_used, final_voiceover_plan
         voiceover_audio_count = 0
         poster_duration_used = poster_duration if poster_image_path else 0.0
         with tempfile.TemporaryDirectory(prefix="batch_video_compose_") as tmp:
@@ -3010,10 +3925,22 @@ async def compose_final_video(req: ComposeFinalVideoRequest):
             segment_durations: list[float] = []
             main_prepared_paths: list[Path] = []
             poster_prepared_path: Path | None = None
+            planned_voiceovers: list[str] = []
+            if should_voiceover:
+                planned_voiceovers = await _build_final_voiceover_plan(
+                    [item for item, _input_path in local_segments],
+                    product_name=product_name,
+                    product_description=req.product_description,
+                    selling_points=req.selling_points,
+                    style=req.voiceover_style,
+                    speed_ratio=req.tts_speed_ratio,
+                )
+                final_voiceover_plan = planned_voiceovers
 
             for index, (item, input_path) in enumerate(local_segments):
                 prepared = tmp_dir / f"segment_{index:03d}.mp4"
-                raw_voiceover_text = (item.voiceover_text or "").strip()
+                planned_voiceover_text = planned_voiceovers[index] if index < len(planned_voiceovers) else ""
+                raw_voiceover_text = (planned_voiceover_text or item.voiceover_text or "").strip()
                 voiceover_text = _voiceover_for_final_segment(
                     raw_voiceover_text,
                     product_name,
@@ -3022,58 +3949,139 @@ async def compose_final_video(req: ComposeFinalVideoRequest):
                 subtitle = item.subtitle or voiceover_text or item.title or f"Segment {index + 1}"
                 if req.voiceover_enabled and voiceover_text and subtitle == raw_voiceover_text:
                     subtitle = voiceover_text
+                original_voiceover_text = voiceover_text
 
                 source_duration = await asyncio.to_thread(deps.get_local_video_duration_seconds, item.video_url) or 0.0
                 effective_start_time = item.start_time
                 effective_end_time = item.end_time
+                prepared_voiceover_audio_path: Path | None = None
                 segment_duration = _segment_clip_duration(item)
                 if segment_duration <= 0:
                     segment_duration = _segment_duration_from_source(item, source_duration)
 
-                if req.rhythm_match_enabled and segment_duration > 0 and voiceover_text:
-                    original_voiceover_text = voiceover_text
-                    voiceover_estimate = _voiceover_duration_estimate(voiceover_text, req.tts_speed_ratio)
-                    if should_voiceover and voiceover_estimate > segment_duration + 0.35:
-                        next_voiceover_text = await _rewrite_voiceover_for_duration(
+                if should_voiceover and voiceover_text:
+                    audio_path = tmp_dir / f"voiceover_{index:03d}.mp3"
+                    await synthesize_speech_2_0_file(
+                        api_key=voiceover_api_key,
+                        text=voiceover_text,
+                        output_path=audio_path,
+                        voice_type=req.tts_voice_type,
+                        speed_ratio=req.tts_speed_ratio,
+                    )
+                    if not audio_path.exists() or audio_path.stat().st_size <= 0:
+                        raise DoubaoSpeechError("Voiceover synthesis returned empty audio.")
+                    audio_duration = await asyncio.to_thread(_media_duration_seconds_sync, ffmpeg, audio_path)
+                    audio_duration_hint = audio_duration or _voiceover_duration_estimate(voiceover_text, req.tts_speed_ratio)
+                    target_min_duration, target_max_duration = _voiceover_duration_window(segment_duration)
+                    if (
+                        req.rhythm_match_enabled
+                        and segment_duration > 0
+                        and audio_duration_hint
+                        and not (target_min_duration <= audio_duration_hint <= target_max_duration)
+                    ):
+                        best_voiceover_text = voiceover_text
+                        best_audio_path = audio_path
+                        best_duration_hint = audio_duration_hint
+                        best_distance = _voiceover_duration_distance(best_duration_hint, segment_duration)
+                        target_durations = (
+                            segment_duration,
+                            max(0.45, segment_duration - 0.18),
+                            segment_duration + 0.12,
+                            max(0.45, segment_duration - 0.35),
+                        )
+                        for attempt_index, target_duration in enumerate(target_durations, start=1):
+                            next_voiceover_text = await _rewrite_voiceover_for_duration(
+                                best_voiceover_text,
+                                target_duration=target_duration,
+                                product_name=product_name,
+                                speed_ratio=req.tts_speed_ratio,
+                            )
+                            if not next_voiceover_text or next_voiceover_text == best_voiceover_text:
+                                min_chars, max_chars = _voiceover_char_range_for_duration(target_duration, req.tts_speed_ratio)
+                                if best_duration_hint > target_max_duration:
+                                    next_voiceover_text = _shorten_voiceover_locally(best_voiceover_text, max_chars)
+                                else:
+                                    next_voiceover_text = _expand_voiceover_locally(best_voiceover_text, min_chars, max_chars, product_name)
+                            if not next_voiceover_text or next_voiceover_text == best_voiceover_text:
+                                continue
+                            retry_audio_path = tmp_dir / f"voiceover_retry_{index:03d}_{attempt_index}.mp3"
+                            await synthesize_speech_2_0_file(
+                                api_key=voiceover_api_key,
+                                text=next_voiceover_text,
+                                output_path=retry_audio_path,
+                                voice_type=req.tts_voice_type,
+                                speed_ratio=req.tts_speed_ratio,
+                            )
+                            if retry_audio_path.exists() and retry_audio_path.stat().st_size > 0:
+                                retry_duration = await asyncio.to_thread(_media_duration_seconds_sync, ffmpeg, retry_audio_path)
+                                retry_duration_hint = retry_duration or _voiceover_duration_estimate(next_voiceover_text, req.tts_speed_ratio)
+                                retry_distance = _voiceover_duration_distance(retry_duration_hint, segment_duration)
+                                if retry_distance <= best_distance + 0.03:
+                                    action = "voiceover_refit"
+                                    if retry_duration_hint > best_duration_hint + 0.08:
+                                        action = "voiceover_expanded"
+                                    elif retry_duration_hint < best_duration_hint - 0.08:
+                                        action = "voiceover_simplified"
+                                    rhythm_adjustments.append({
+                                        "scene_id": item.scene_id,
+                                        "title": item.title,
+                                        "action": f"{action}_{attempt_index}",
+                                        "from_duration": round(best_duration_hint, 2),
+                                        "to_duration": round(retry_duration_hint, 2),
+                                    })
+                                    best_voiceover_text = next_voiceover_text
+                                    best_audio_path = retry_audio_path
+                                    best_duration_hint = retry_duration_hint
+                                    best_distance = retry_distance
+                                    if target_min_duration <= best_duration_hint <= target_max_duration:
+                                        break
+                        voiceover_text = best_voiceover_text
+                        audio_path = best_audio_path
+                        audio_duration_hint = best_duration_hint
+                        if subtitle == raw_voiceover_text or subtitle == original_voiceover_text:
+                            subtitle = voiceover_text
+                    final_audio_duration_hint = audio_duration_hint
+                    if (
+                        req.rhythm_match_enabled
+                        and final_audio_duration_hint
+                        and not (target_min_duration <= final_audio_duration_hint <= target_max_duration)
+                    ):
+                        final_voiceover_text = await _rewrite_voiceover_for_duration(
                             voiceover_text,
-                            target_duration=max(0.7, segment_duration - 0.15),
+                            target_duration=segment_duration,
                             product_name=product_name,
                             speed_ratio=req.tts_speed_ratio,
                         )
-                        if next_voiceover_text and next_voiceover_text != voiceover_text:
-                            next_estimate = _voiceover_duration_estimate(next_voiceover_text, req.tts_speed_ratio)
-                            rhythm_adjustments.append({
-                                "scene_id": item.scene_id,
-                                "title": item.title,
-                                "action": "voiceover_shortened",
-                                "from_duration": round(voiceover_estimate, 2),
-                                "to_duration": round(next_estimate, 2),
-                            })
-                            voiceover_text = next_voiceover_text
-                            voiceover_estimate = next_estimate
-
-                    if voiceover_estimate > 0:
-                        target_visual_duration = max(1.0, min(segment_duration, voiceover_estimate + 0.45))
-                        if segment_duration > target_visual_duration * 1.18:
-                            next_start, next_end, next_duration = _effective_clip_bounds_for_duration(
-                                item,
-                                source_duration,
-                                target_visual_duration,
+                        if final_voiceover_text and final_voiceover_text != voiceover_text:
+                            strict_audio_path = tmp_dir / f"voiceover_final_fit_{index:03d}.mp3"
+                            await synthesize_speech_2_0_file(
+                                api_key=voiceover_api_key,
+                                text=final_voiceover_text,
+                                output_path=strict_audio_path,
+                                voice_type=req.tts_voice_type,
+                                speed_ratio=req.tts_speed_ratio,
                             )
-                            if next_duration > 0 and next_duration < segment_duration - 0.15:
-                                rhythm_adjustments.append({
-                                    "scene_id": item.scene_id,
-                                    "title": item.title,
-                                    "action": "visual_trimmed",
-                                    "from_duration": round(segment_duration, 2),
-                                    "to_duration": round(next_duration, 2),
-                                })
-                                effective_start_time = next_start
-                                effective_end_time = next_end
-                                segment_duration = next_duration
+                            if strict_audio_path.exists() and strict_audio_path.stat().st_size > 0:
+                                strict_duration = await asyncio.to_thread(_media_duration_seconds_sync, ffmpeg, strict_audio_path)
+                                strict_duration_hint = strict_duration or _voiceover_duration_estimate(final_voiceover_text, req.tts_speed_ratio)
+                                if (
+                                    _voiceover_duration_distance(strict_duration_hint, segment_duration)
+                                    <= _voiceover_duration_distance(final_audio_duration_hint, segment_duration) + 0.03
+                                ):
+                                    rhythm_adjustments.append({
+                                        "scene_id": item.scene_id,
+                                        "title": item.title,
+                                        "action": "voiceover_final_refit",
+                                        "from_duration": round(final_audio_duration_hint, 2),
+                                        "to_duration": round(strict_duration_hint, 2),
+                                    })
+                                    voiceover_text = final_voiceover_text
+                                    audio_path = strict_audio_path
+                                    audio_duration_hint = strict_duration_hint
+                                    if subtitle == raw_voiceover_text or subtitle == original_voiceover_text:
+                                        subtitle = voiceover_text
+                    prepared_voiceover_audio_path = audio_path
 
-                    if subtitle == raw_voiceover_text or subtitle == original_voiceover_text:
-                        subtitle = voiceover_text
                 segment_durations.append(segment_duration)
 
                 await asyncio.to_thread(
@@ -3106,19 +4114,9 @@ async def compose_final_video(req: ComposeFinalVideoRequest):
                     )
                     original_audio_paths.append(original_audio_path)
 
-                if should_voiceover and voiceover_text:
-                    audio_path = tmp_dir / f"voiceover_{index:03d}.mp3"
+                if should_voiceover and voiceover_text and prepared_voiceover_audio_path:
                     fitted_audio_path = tmp_dir / f"voiceover_fit_{index:03d}.m4a"
-                    await synthesize_speech_2_0_file(
-                        api_key=voiceover_api_key,
-                        text=voiceover_text,
-                        output_path=audio_path,
-                        voice_type=req.tts_voice_type,
-                        speed_ratio=req.tts_speed_ratio,
-                    )
-                    if not audio_path.exists() or audio_path.stat().st_size <= 0:
-                        raise DoubaoSpeechError("Voiceover synthesis returned empty audio.")
-                    await asyncio.to_thread(_fit_audio_to_duration_sync, ffmpeg, audio_path, fitted_audio_path, segment_duration)
+                    await asyncio.to_thread(_fit_audio_to_duration_sync, ffmpeg, prepared_voiceover_audio_path, fitted_audio_path, segment_duration)
                     voiceover_audio_paths.append(fitted_audio_path)
                     voiceover_audio_count += 1
                 elif should_voiceover:
@@ -3267,6 +4265,7 @@ async def compose_final_video(req: ComposeFinalVideoRequest):
         "voiceover_generated": voiceover_generated,
         "voiceover_provider": req.tts_provider,
         "voiceover_error": voiceover_error,
+        "voiceover_plan": final_voiceover_plan,
         "rhythm_match_enabled": req.rhythm_match_enabled,
         "rhythm_adjustments": rhythm_adjustments,
         "poster_appended": bool(poster_image_path),

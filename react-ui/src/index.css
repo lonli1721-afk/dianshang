@@ -6233,6 +6233,7 @@ input::placeholder, textarea::placeholder {
 
 .matrix-panel,
 .storyboard-panel,
+.auto-pipeline-panel,
 .task-panel {
   max-width: 1320px;
   margin: 0 auto 16px;
@@ -6262,6 +6263,35 @@ input::placeholder, textarea::placeholder {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.batch-video-auto-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(4, 104px) auto;
+  align-items: end;
+  gap: 14px;
+}
+
+.batch-video-auto-copy {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.batch-video-auto-copy strong {
+  color: var(--text-primary);
+  font-size: 15px;
+}
+
+.batch-video-auto-copy span {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.batch-video-auto-button {
+  min-height: 42px;
+  white-space: nowrap;
 }
 
 .batch-video-product-memory {
@@ -6518,6 +6548,44 @@ input::placeholder, textarea::placeholder {
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
+}
+
+.batch-video-local-recovery {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(260px, 1.4fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
+.batch-video-local-recovery-copy {
+  display: grid;
+  gap: 3px;
+}
+
+.batch-video-local-recovery-copy strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.batch-video-local-recovery-copy span {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.batch-video-local-recovery input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 10px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
 }
 
 .batch-video-file-line,
@@ -7110,6 +7178,18 @@ input::placeholder, textarea::placeholder {
   color: var(--text-muted);
 }
 
+.batch-video-task-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.batch-video-task-status .batch-video-button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
 .batch-video-final-toolbar {
   display: flex;
   align-items: center;
@@ -7277,6 +7357,195 @@ input::placeholder, textarea::placeholder {
   resize: vertical;
   color: var(--text-secondary);
   background: var(--bg-primary);
+}
+
+.batch-video-review-panel {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
+.batch-video-review-head,
+.batch-video-review-actions,
+.batch-video-review-stats,
+.batch-video-review-card-actions,
+.batch-video-review-clip-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.batch-video-review-head {
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.batch-video-review-head > div:first-child,
+.batch-video-review-subtitle,
+.batch-video-review-card-body,
+.batch-video-review-clip > div:first-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.batch-video-review-head strong,
+.batch-video-review-subtitle strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.batch-video-review-head span,
+.batch-video-review-subtitle span,
+.batch-video-review-card-body span,
+.batch-video-review-clip span {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.batch-video-review-stats {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.batch-video-review-stats span {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.batch-video-review-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.batch-video-review-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.9fr);
+  gap: 10px;
+}
+
+.batch-video-review-library,
+.batch-video-review-pool {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-primary);
+}
+
+.batch-video-review-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 8px;
+  max-height: 520px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.batch-video-review-card {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
+.batch-video-review-preview {
+  width: 82px;
+  aspect-ratio: 9 / 16;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-tertiary);
+}
+
+.batch-video-review-preview video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.batch-video-review-card-body strong,
+.batch-video-review-clip strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.batch-video-review-card-body span {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.batch-video-review-card-actions {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  margin-top: auto;
+}
+
+.batch-video-review-card-actions em {
+  color: var(--accent);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.batch-video-review-clip-list {
+  display: grid;
+  gap: 7px;
+  max-height: 520px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.batch-video-review-clip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
+.batch-video-review-clip-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+}
+
+.batch-video-review-clip-actions button:hover {
+  color: var(--accent);
+  border-color: rgba(124, 92, 255, 0.36);
 }
 
 .batch-video-final-toolbar .batch-video-button.primary {
@@ -7455,6 +7724,148 @@ input::placeholder, textarea::placeholder {
   line-height: 1.5;
 }
 
+.batch-video-final-result.stale {
+  max-width: 760px;
+  padding: 12px;
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+  background: #fff7ed;
+}
+
+.batch-video-final-warning {
+  color: #9a3412;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.batch-video-auto-works {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.batch-video-auto-works-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.batch-video-auto-works-head > div {
+  display: grid;
+  gap: 4px;
+}
+
+.batch-video-auto-works-head strong {
+  color: var(--text-primary);
+  font-size: 15px;
+}
+
+.batch-video-auto-works-head span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.batch-video-auto-work-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.batch-video-auto-work-card {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-primary);
+}
+
+.batch-video-auto-work-preview {
+  width: 92px;
+  aspect-ratio: 9 / 16;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #000;
+  padding: 0;
+  cursor: pointer;
+}
+
+.batch-video-auto-work-preview video,
+.batch-video-auto-work-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.batch-video-auto-work-body {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.batch-video-auto-work-body strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-video-auto-work-body span,
+.batch-video-auto-work-body em {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.batch-video-auto-work-body .batch-video-auto-work-strategy {
+  width: fit-content;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid rgba(124, 92, 255, 0.28);
+  border-radius: 6px;
+  padding: 3px 8px;
+  background: rgba(124, 92, 255, 0.08);
+  color: #5b3ff2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-video-auto-work-body em {
+  color: var(--danger);
+  font-style: normal;
+}
+
+.batch-video-auto-work-final-player {
+  width: min(240px, 100%);
+  aspect-ratio: 9 / 16;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #000;
+  object-fit: contain;
+}
+
+.batch-video-auto-work-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.batch-video-auto-work-actions .batch-video-button {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
 .batch-video-empty {
   min-height: 180px;
   display: flex;
@@ -7491,6 +7902,10 @@ input::placeholder, textarea::placeholder {
   .batch-video-matrix-grid {
     grid-template-columns: 1fr 1fr;
   }
+
+  .batch-video-review-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 760px) {
@@ -7499,6 +7914,7 @@ input::placeholder, textarea::placeholder {
   }
 
   .batch-video-form-grid,
+  .batch-video-auto-layout,
   .batch-video-matrix-grid,
   .batch-video-tts-toolbar,
   .batch-video-bgm-toolbar,
@@ -7510,6 +7926,21 @@ input::placeholder, textarea::placeholder {
   .batch-video-clip-time-grid,
   .batch-video-clip-time-input-row,
   .batch-video-scene-body {
+    grid-template-columns: 1fr;
+  }
+
+  .batch-video-review-head,
+  .batch-video-review-actions,
+  .batch-video-review-clip {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .batch-video-review-stats {
+    justify-content: flex-start;
+  }
+
+  .batch-video-review-card-grid {
     grid-template-columns: 1fr;
   }
 
@@ -7541,6 +7972,14 @@ input::placeholder, textarea::placeholder {
   .batch-video-matrix-actions {
     width: 100%;
     margin-left: 0;
+  }
+
+  .batch-video-auto-work-card {
+    grid-template-columns: 82px minmax(0, 1fr);
+  }
+
+  .batch-video-auto-work-preview {
+    width: 82px;
   }
 
   .batch-video-header h1 {

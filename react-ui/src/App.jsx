@@ -355,7 +355,7 @@ export default function App() {
                     path="/batch-video-workbench"
                     element={(
                       <Suspense fallback={<RouteLoadingFallback />}>
-                        <BatchVideoWorkbenchPage />
+                        <BatchVideoWorkbenchPage key="batch-video-workbench" />
                       </Suspense>
                     )}
                   />

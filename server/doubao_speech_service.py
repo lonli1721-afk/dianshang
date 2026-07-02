@@ -27,6 +27,7 @@ DOUBAO_TTS_WS_URL = os.environ.get(
 )
 DOUBAO_TTS_RESOURCE_ID = os.environ.get("DOUBAO_TTS_2_0_RESOURCE_ID", "seed-tts-2.0")
 DOUBAO_TTS_VOICE_TYPE = os.environ.get("DOUBAO_TTS_2_0_VOICE_TYPE", "zh_female_gaolengyujie_uranus_bigtts")
+DOUBAO_TTS_EVENT_TIMEOUT_SECONDS = max(10, int(os.environ.get("DOUBAO_TTS_2_0_EVENT_TIMEOUT", "45")))
 SAMPLE_RATE = 16000
 CHANNELS = 1
 BYTES_PER_SAMPLE = 2
@@ -348,7 +349,11 @@ def _unpack_tts_server_message(data: bytes) -> dict[str, Any]:
 
 async def _wait_tts_event(ws: Any, expected_event: int) -> dict[str, Any]:
     while True:
-        msg = _unpack_tts_server_message(await ws.recv())
+        try:
+            raw_msg = await asyncio.wait_for(ws.recv(), timeout=DOUBAO_TTS_EVENT_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as exc:
+            raise DoubaoSpeechError(f"豆包语音合成等待事件超时：{expected_event}") from exc
+        msg = _unpack_tts_server_message(raw_msg)
         event = int(msg.get("event") or 0)
         if int(msg.get("msg_type") or 0) == TTS_MSG_ERROR:
             detail = msg.get("json") or msg.get("text") or msg.get("payload") or ""
@@ -440,7 +445,11 @@ async def synthesize_speech_2_0_file(
             send_task = asyncio.create_task(_send_text())
             try:
                 while True:
-                    msg = _unpack_tts_server_message(await ws.recv())
+                    try:
+                        raw_msg = await asyncio.wait_for(ws.recv(), timeout=DOUBAO_TTS_EVENT_TIMEOUT_SECONDS)
+                    except asyncio.TimeoutError as exc:
+                        raise DoubaoSpeechError("豆包语音合成等待音频返回超时。") from exc
+                    msg = _unpack_tts_server_message(raw_msg)
                     event = int(msg.get("event") or 0)
                     msg_type = int(msg.get("msg_type") or 0)
                     if msg_type == TTS_MSG_ERROR:
